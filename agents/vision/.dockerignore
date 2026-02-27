@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.ipynb_checkpoints/
+data/
+cache/
+models/
+dataset/
+*.pth
+*.h5
+*.onnx

@@ -1,0 +1,31 @@
+# ============================================================================
+# Audio Agent Requirements
+# ============================================================================
+
+# Core Web Framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.31.0
+pydantic>=2.12.0
+python-multipart>=0.0.21
+
+# Deep Learning
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# Audio Processing
+librosa>=0.10.1
+soundfile>=0.12.1
+pydub>=0.25.1
+
+# NLP & Transformers
+transformers>=4.35.0
+tokenizers>=0.15.0
+
+# Scientific Computing
+numpy>=1.24.3,<2.0.0
+scipy>=1.11.0
+
+# Utilities
+python-dotenv>=1.0.0
+tqdm>=4.67.1
+requests>=2.31.0

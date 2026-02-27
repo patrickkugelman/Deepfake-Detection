@@ -1,0 +1,119 @@
+# Environment variables - NU urca pe GitHub!
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+deep/
+
+# Media files (test videos/audio - use cloud storage instead)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.mp3
+*.wav
+*.flac
+*.ogg
+*.m4a
+*.aac
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.next/
+*.log
+npm-debug.log*
+
+# Docker volumes / data
+data/
+*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Credentials
+credentials/
+*.json
+!package.json
+!tsconfig.json
+!render.yaml
+
+# Logs
+logs/
+*.log
+
+# Temp files
+*.tmp
+*.temp
+
+# ── Modele antrenate (fișiere mari - nu urca pe GitHub) ──
+*.pth
+*.pt
+*.h5
+*.pkl
+*.bin
+*.onnx
+*.safetensors
+
+# ── Datasets per agent ──
+agents/audio/dataset/
+agents/video/dataset/
+agents/vision/dataset/
+agents/text/dataset/
+agents/bio/dataset/
+agents/scraper/dataset/
+
+# ── Directoare modele mari ──
+agents/video/models_i3d/
+backup_models/
+models/
+
+# ── Date runtime / stocare ──
+seaweedfs/
+inbox/
+data/neo4j/
+data/evidence/
+data/cache/
+
+# ── Claude IDE ──
+.claude/
+
+# ── README files ──
+README*
+readme*
+
+# ── Fișiere speciale Windows ──
+nul
+NUL
+
+# ── Rapoarte generate runtime ──
+agents/coordinator/reports/
+reports/
+
+# ── Fișiere PDF generate ──
+*.pdf

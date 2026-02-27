@@ -1,0 +1,45 @@
+services:
+  - type: web
+    name: deepguard-api
+    runtime: docker
+    dockerfilePath: ./agents/coordinator/Dockerfile
+    dockerContext: ./agents/coordinator
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: NEO4J_URI
+        value: bolt://your-neo4j-host:7687
+      - key: NEO4J_USER
+        value: neo4j
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: REDIS_PASSWORD
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.0-flash
+      - key: GEMINI_VISION_MODEL
+        value: gemini-2.0-flash
+      - key: N8N_WEBHOOK_URL
+        value: https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-email
+      - key: REPORT_API_KEY
+        value: deepguard_report_2025
+      - key: ADMIN_PASSWORD
+        value: deepguard123
+      - key: ADMIN_EMAIL
+        value: patrick21.kugelman@gmail.com
+      - key: MAIL_FROM
+        value: patrick21.kugelman@gmail.com
+      - key: FRONTEND_URL
+        value: http://localhost:8501
+      - key: ENABLE_EMAIL_NOTIFICATIONS
+        value: "true"
+      - key: LOG_LEVEL
+        value: INFO

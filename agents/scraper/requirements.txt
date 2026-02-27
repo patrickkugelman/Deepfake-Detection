@@ -1,0 +1,10 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+requests==2.31.0
+apscheduler==3.10.4
+beautifulsoup4==4.12.3
+arxiv==2.1.0
+google-generativeai>=0.3.0
+python-dotenv==1.0.1
+pydantic==2.6.1
+feedparser>=6.0.10
