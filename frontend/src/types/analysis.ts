@@ -121,4 +121,18 @@ export interface JobDetails {
 
   // Extra for compatibility if needed
   result?: any;
+
+  // OSINT Investigation (populated async by n8n after FAKE verdict)
+  osint_results?: {
+    risk_level?: string;
+    osint_risk_score?: number;
+    reverse_image_matches?: number;
+    tineye_matches?: number;
+    ai_detection_verdict?: string;
+    summary?: string;
+    reverse_image_results?: Array<{ url: string; source: string; title: string }>;
+    [key: string]: any;
+  };
+  osint_risk_level?: string;
+  osint_completed_at?: string;
 }

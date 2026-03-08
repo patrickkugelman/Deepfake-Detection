@@ -644,7 +644,36 @@ async def run_analysis_pipeline(
             logger.error(f"❌ Neo4j fallback save failed: {e}")
     
     # ========================================================================
-    # STEP 7: Send Email Notification (100%)
+    # STEP 7: Trigger OSINT Investigation (async, non-blocking)
+    # ========================================================================
+    # Trigger n8n OSINT pipeline only for FAKE/SUSPICIOUS verdicts with images/video
+    n8n_osint_url = os.getenv("N8N_OSINT_WEBHOOK_URL", "")
+    if n8n_osint_url and final_verdict in ("FAKE", "SUSPICIOUS"):
+        try:
+            import urllib.request
+            osint_payload = json.dumps({
+                "job_id": job_id,
+                "filename": filename,
+                "verdict": final_verdict,
+                "confidence": confidence,
+                "file_url": s3_url,
+                "file_hash": f_hash,
+                "callback_url": f"{os.getenv('COORDINATOR_URL', 'http://deepguard_brain:8000')}/osint/report",
+                "api_key": os.getenv("REPORT_API_KEY", "deepguard_report_2025")
+            }).encode()
+            req = urllib.request.Request(
+                n8n_osint_url,
+                data=osint_payload,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                logger.info(f"🔍 OSINT investigation triggered for job {job_id} — n8n response: {resp.status}")
+        except Exception as e:
+            logger.warning(f"⚠️ OSINT trigger failed (non-critical): {e}")
+
+    # ========================================================================
+    # STEP 8: Send Email Notification (100%)
     # ========================================================================
     update_job_status(job_id, "completed", 100, "✅ Analiză finalizată!")
     

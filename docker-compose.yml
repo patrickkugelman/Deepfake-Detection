@@ -28,6 +28,7 @@ services:
       - MAIL_FROM=${MAIL_FROM}
       - ADMIN_EMAIL=${ADMIN_EMAIL}
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-email}
+      - N8N_OSINT_WEBHOOK_URL=${N8N_OSINT_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-osint}
       - REPORT_API_KEY=${REPORT_API_KEY:-deepguard_report_2025}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-deepguard123}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-patrick21.kugelman@gmail.com}
@@ -280,6 +281,7 @@ services:
       - MAIL_FROM=${MAIL_FROM}
       - ADMIN_EMAIL=${ADMIN_EMAIL}
       - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-email}
+      - N8N_OSINT_WEBHOOK_URL=${N8N_OSINT_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-osint}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8501}
       - REPORT_API_KEY=${REPORT_API_KEY:-deepguard_report_2025}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}

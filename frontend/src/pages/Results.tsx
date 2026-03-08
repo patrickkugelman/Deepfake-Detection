@@ -13,7 +13,7 @@ import { Input } from '@/components/ui/input';
 import {
   Brain, Shield, AlertTriangle, RefreshCw,
   FileText, Activity, Loader2, CheckCircle2, Terminal, Fingerprint, Send, MessageCircle,
-  Eye, Mic, Video, Type, Bot, Image
+  Eye, Mic, Video, Type, Bot, Image, Search
 } from 'lucide-react';
 
 // Utils & API
@@ -43,6 +43,8 @@ export default function Results() {
   const [chatWs, setChatWs] = useState<WebSocket | null>(null);
   const [chatMessages, setChatMessages] = useState<Array<{ role: string; content: string }>>([]);
   const [chatInput, setChatInput] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
   const sendChatMessage = (text: string) => {
@@ -50,6 +52,8 @@ export default function Results() {
     chatWs.send(JSON.stringify({ message: text.trim() }));
     setChatMessages((prev) => [...prev, { role: 'user', content: text.trim() }]);
     setChatInput('');
+    setIsTyping(true);
+    setSuggestedQuestions([]); // ascunde suggested după primul mesaj
   };
 
   useEffect(() => {
@@ -119,7 +123,10 @@ export default function Results() {
       try {
         const data = JSON.parse(e.data);
         if (data.type === 'message') {
+          setIsTyping(false);
           setChatMessages((prev) => [...prev, { role: 'assistant', content: data.content }]);
+        } else if (data.type === 'suggested_questions') {
+          setSuggestedQuestions(data.questions || []);
         }
       } catch {
         // ignore
@@ -592,39 +599,159 @@ export default function Results() {
               </CardContent>
             </Card>
 
+            {/* OSINT Investigation Results */}
+            {jobDetails?.osint_results && (
+              <Card className="bg-card/50 border-orange-500/20 shadow-lg">
+                <CardHeader>
+                  <CardTitle className="text-xs font-bold uppercase tracking-widest text-orange-400 flex items-center gap-2">
+                    <Search className="h-4 w-4" /> Investigație OSINT
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3 text-sm">
+                  {/* Risk Level Badge */}
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground text-xs">Nivel Risc</span>
+                    <span className={cn(
+                      "text-xs font-bold px-2 py-0.5 rounded-full",
+                      jobDetails.osint_risk_level === 'HIGH'   && "bg-red-500/20 text-red-400 border border-red-500/30",
+                      jobDetails.osint_risk_level === 'MEDIUM' && "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30",
+                      jobDetails.osint_risk_level === 'LOW'    && "bg-green-500/20 text-green-400 border border-green-500/30",
+                      !['HIGH','MEDIUM','LOW'].includes(jobDetails.osint_risk_level || '') && "bg-muted text-muted-foreground border border-border"
+                    )}>
+                      {jobDetails.osint_risk_level || 'N/A'}
+                    </span>
+                  </div>
+
+                  {/* Scor OSINT */}
+                  {typeof jobDetails.osint_results.osint_risk_score === 'number' && (
+                    <div className="flex items-center justify-between border-t border-border pt-2">
+                      <span className="text-muted-foreground text-xs">Scor risc</span>
+                      <span className="font-mono text-xs text-foreground">{jobDetails.osint_results.osint_risk_score}/85</span>
+                    </div>
+                  )}
+
+                  {/* Reverse Image Search */}
+                  <div className="flex items-center justify-between border-t border-border pt-2">
+                    <span className="text-muted-foreground text-xs">Reverse Image</span>
+                    <span className="font-mono text-xs text-foreground">
+                      {jobDetails.osint_results.reverse_image_matches ?? 'N/A'} potriviri
+                    </span>
+                  </div>
+
+                  {/* TinEye */}
+                  <div className="flex items-center justify-between border-t border-border pt-2">
+                    <span className="text-muted-foreground text-xs">TinEye</span>
+                    <span className="font-mono text-xs text-foreground">
+                      {jobDetails.osint_results.tineye_matches < 0 ? 'N/A' : `${jobDetails.osint_results.tineye_matches} matches`}
+                    </span>
+                  </div>
+
+                  {/* AI Detection */}
+                  {jobDetails.osint_results.ai_detection_verdict && (
+                    <div className="flex items-center justify-between border-t border-border pt-2">
+                      <span className="text-muted-foreground text-xs">SightEngine AI</span>
+                      <span className="font-mono text-xs text-foreground">{jobDetails.osint_results.ai_detection_verdict}</span>
+                    </div>
+                  )}
+
+                  {/* Summary */}
+                  {jobDetails.osint_results.summary && (
+                    <p className="text-xs text-muted-foreground border-t border-border pt-2 leading-relaxed">
+                      {jobDetails.osint_results.summary}
+                    </p>
+                  )}
+
+                  {/* Surse găsite */}
+                  {Array.isArray(jobDetails.osint_results.reverse_image_results) && jobDetails.osint_results.reverse_image_results.length > 0 && (
+                    <div className="border-t border-border pt-2 space-y-1">
+                      <p className="text-[10px] uppercase font-bold text-muted-foreground mb-1">Surse identificate</p>
+                      {jobDetails.osint_results.reverse_image_results.slice(0, 3).map((r: any, i: number) => (
+                        <a key={i} href={r.url} target="_blank" rel="noopener noreferrer"
+                           className="block text-xs text-orange-400 hover:text-orange-300 truncate">
+                          🔗 {r.source} — {r.title}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             {/* Chatbot Cortex */}
             <Card className="bg-card/50 border-purple-500/20 shadow-lg">
               <CardHeader>
                 <CardTitle className="text-xs font-bold uppercase tracking-widest text-purple-500 flex items-center gap-2">
                   <MessageCircle className="h-4 w-4" /> Întreabă Cortex
+                  {chatWs && (
+                    <span className="ml-auto w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" title="Conectat" />
+                  )}
                 </CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="h-48 overflow-y-auto space-y-2 text-sm border border-border rounded-lg p-3 bg-muted/30">
-                  {chatMessages.length === 0 && (
-                    <p className="text-muted-foreground text-xs italic">Pune întrebări despre rezumatul analizei.</p>
+              <CardContent className="space-y-3">
+                {/* Zona mesaje */}
+                <div className="h-64 overflow-y-auto space-y-2 text-sm border border-border rounded-lg p-3 bg-muted/30">
+                  {chatMessages.length === 0 && !isTyping && (
+                    <p className="text-muted-foreground text-xs italic">
+                      Pune întrebări despre analiză sau folosește sugestiile de mai jos.
+                    </p>
                   )}
                   {chatMessages.map((m, i) => (
                     <div key={i} className={cn("flex", m.role === 'user' ? 'justify-end' : 'justify-start')}>
                       <div className={cn(
-                        "max-w-[85%] rounded-lg px-3 py-2 text-sm",
-                        m.role === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted text-foreground'
+                        "max-w-[85%] rounded-lg px-3 py-2 text-sm leading-relaxed",
+                        m.role === 'user'
+                          ? 'bg-purple-600 text-white'
+                          : 'bg-muted text-foreground border border-border'
                       )}>
                         {m.content}
                       </div>
                     </div>
                   ))}
+                  {/* Typing indicator */}
+                  {isTyping && (
+                    <div className="flex justify-start">
+                      <div className="bg-muted border border-border rounded-lg px-3 py-2 flex gap-1 items-center">
+                        <span className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce [animation-delay:0ms]" />
+                        <span className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce [animation-delay:150ms]" />
+                        <span className="w-1.5 h-1.5 bg-purple-400 rounded-full animate-bounce [animation-delay:300ms]" />
+                      </div>
+                    </div>
+                  )}
                   <div ref={chatEndRef} />
                 </div>
+
+                {/* Suggested questions */}
+                {suggestedQuestions.length > 0 && chatMessages.length === 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {suggestedQuestions.map((q, i) => (
+                      <button
+                        key={i}
+                        onClick={() => sendChatMessage(q)}
+                        disabled={!chatWs}
+                        className="text-[11px] bg-purple-500/10 border border-purple-500/20 text-purple-300 px-2 py-1 rounded-full hover:bg-purple-500/25 transition-colors disabled:opacity-40"
+                      >
+                        {q}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {/* Input */}
                 <div className="flex gap-2">
                   <Input
-                    placeholder="Ex: De ce e considerat fake?"
+                    placeholder="Întreabă despre analiză..."
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && sendChatMessage(chatInput)}
+                    onKeyDown={(e) => e.key === 'Enter' && !isTyping && sendChatMessage(chatInput)}
+                    disabled={isTyping || !chatWs}
+                    className="text-sm"
                   />
-                  <Button size="icon" onClick={() => sendChatMessage(chatInput)} disabled={!chatWs}>
-                    <Send className="h-4 w-4" />
+                  <Button
+                    size="icon"
+                    onClick={() => sendChatMessage(chatInput)}
+                    disabled={!chatWs || isTyping || !chatInput.trim()}
+                  >
+                    {isTyping ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                   </Button>
                 </div>
               </CardContent>

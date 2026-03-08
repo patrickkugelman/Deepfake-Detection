@@ -813,7 +813,10 @@ async def get_job_status(job_id: str, current_user: Dict = Depends(get_current_u
                j.filename as filename,
                j.file_size as file_size,
                j.mime_type as mime_type,
-               j.resolution as resolution
+               j.resolution as resolution,
+               j.osint_results as osint_results,
+               j.osint_risk_level as osint_risk_level,
+               j.osint_completed_at as osint_completed_at
     """, {"job_id": job_id, "username": username})
     
     if not result:
@@ -842,7 +845,15 @@ async def get_job_status(job_id: str, current_user: Dict = Depends(get_current_u
                 data['error'] = str(task_result.info)
         except Exception as e:
             logger.error(f"Celery status check error: {e}")
-            
+
+    # Parse OSINT results if stored as string
+    osint_results = data.get("osint_results")
+    if isinstance(osint_results, str):
+        try:
+            osint_results = json.loads(osint_results)
+        except Exception:
+            pass
+
     # Gracefully handle return structure
     return {
         "job_id": job_id,
@@ -859,7 +870,10 @@ async def get_job_status(job_id: str, current_user: Dict = Depends(get_current_u
         "created_at": data.get("created_at"),
         "completed_at": data.get("completed_at"),
         "result": data.get("result"),
-        "celery_state": data.get("celery_state")
+        "celery_state": data.get("celery_state"),
+        "osint_results": osint_results,
+        "osint_risk_level": data.get("osint_risk_level"),
+        "osint_completed_at": data.get("osint_completed_at")
     }
 
 @app.post("/jobs/{job_id}/cancel")
@@ -1108,93 +1122,240 @@ async def update_email_config(request: Request, current_user: Dict = Depends(get
 # ============================================================================
 # WEBSOCKET CHAT ENDPOINT (Chatbot Q&A)
 # ============================================================================
+def _build_chat_context(job: dict) -> dict:
+    """Extrage contextul complet al analizei din datele Neo4j pentru chatbot."""
+    filename = job.get("filename", "Unknown")
+    verdict = job.get("verdict", "N/A")
+    reasoning = job.get("reasoning", "N/A")
+    confidence = job.get("confidence", 0) or 0
+    if confidence > 1:
+        confidence = confidence / 100
+
+    details: dict = {}
+    agents_used: list = []
+
+    raw_result = job.get("result")
+    if raw_result:
+        try:
+            parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
+            if not verdict or verdict == "N/A":
+                verdict = parsed.get("verdict", verdict)
+                reasoning = parsed.get("reasoning", reasoning)
+                confidence = parsed.get("confidence", confidence) or confidence
+            details = parsed.get("details", {})
+            agents_used = parsed.get("agents_used", list(details.keys()))
+        except Exception:
+            pass
+
+    # --- Rezumat per agent ---
+    agent_lines = []
+    for agent_name, agent_data in details.items():
+        if not isinstance(agent_data, dict):
+            continue
+        av = str(agent_data.get("verdict", agent_data.get("is_ai_generated", "N/A"))).upper()
+        fp = agent_data.get("fake_probability", agent_data.get("confidence", None))
+        conf_str = f"{fp:.1f}%" if isinstance(fp, (int, float)) else "N/A"
+        agent_lines.append(f"  • {agent_name}: {av} ({conf_str})")
+    agent_summary = "\n".join(agent_lines) if agent_lines else "  N/A"
+
+    # --- Fingerprint ---
+    fp_data = details.get("fingerprint", {})
+    detected_model = fp_data.get("detected_model") or fp_data.get("model_type")
+    fp_conf = fp_data.get("confidence")
+    if detected_model:
+        fp_conf_str = f"{fp_conf*100:.0f}%" if isinstance(fp_conf, float) and fp_conf <= 1 else (f"{fp_conf:.0f}%" if fp_conf else "")
+        fingerprint_info = f"Detectat: {detected_model} {fp_conf_str}".strip()
+    else:
+        fingerprint_info = "N/A"
+
+    # --- Grad-CAM ---
+    vision_data = details.get("vision", {})
+    evidence_list = vision_data.get("evidence", [])
+    gradcam_items = [e for e in evidence_list if isinstance(e, dict) and e.get("type") == "grad_cam"]
+    gradcam_info = f"Disponibil la {gradcam_items[0].get('url', '')}" if gradcam_items else "N/A"
+
+    # --- Frame analyses (Gemini) ---
+    gemini_data = details.get("gemini_vision", {})
+    frame_analyses = gemini_data.get("frame_analyses", [])
+    frame_lines = []
+    for fa in frame_analyses[:3]:
+        ts = fa.get("timestamp", "?")
+        fv = str(fa.get("verdict", "?")).upper()
+        arts = fa.get("artifacts_detected", [])
+        arts_str = ", ".join(arts[:3]) if arts else ""
+        frame_lines.append(f"  • Frame la {ts}s: {fv}" + (f" — {arts_str}" if arts_str else ""))
+    frames_info = "\n".join(frame_lines) if frame_lines else "N/A"
+
+    # --- OSINT ---
+    osint_raw = job.get("osint_results")
+    osint_data: dict = {}
+    if isinstance(osint_raw, str):
+        try:
+            osint_data = json.loads(osint_raw)
+        except Exception:
+            pass
+    elif isinstance(osint_raw, dict):
+        osint_data = osint_raw
+    risk_level = job.get("osint_risk_level") or osint_data.get("risk_level")
+    osint_summary_text = osint_data.get("summary", "")
+    osint_info = f"Risc: {risk_level}. {osint_summary_text}".strip(" .") if risk_level else "N/A"
+
+    return {
+        "filename": filename,
+        "verdict": verdict,
+        "confidence": confidence,
+        "reasoning": reasoning,
+        "agents_used": agents_used,
+        "agent_summary": agent_summary,
+        "fingerprint_info": fingerprint_info,
+        "detected_model": detected_model,
+        "gradcam_info": gradcam_info,
+        "has_gradcam": bool(gradcam_items),
+        "frames_info": frames_info,
+        "has_frames": bool(frame_lines),
+        "osint_info": osint_info,
+        "has_osint": bool(risk_level),
+        "mime_type": job.get("mime_type", ""),
+    }
+
+
+def _build_suggested_questions(ctx: dict) -> list:
+    """Generează întrebări sugestive bazate pe contextul analizei."""
+    verdict = ctx.get("verdict", "N/A")
+    questions = [
+        f"De ce e considerat {verdict}?",
+        "Care agent a fost cel mai sigur în decizie?",
+    ]
+    if ctx.get("detected_model"):
+        questions.append(f"Ce înseamnă că a fost creat cu {ctx['detected_model']}?")
+    if ctx.get("has_gradcam"):
+        questions.append("Explică heatmap-ul Grad-CAM — ce zone sunt suspecte?")
+    if ctx.get("has_osint"):
+        questions.append("Ce a găsit investigația OSINT?")
+    if ctx.get("has_frames"):
+        questions.append("Care frame din video a fost cel mai suspect?")
+    if verdict in ("FAKE", "SUSPICIOUS"):
+        questions.append("Ce ar putea face utilizatorul cu această informație?")
+    return questions[:6]
+
+
 @app.websocket("/ws/chat")
 async def chat_websocket_endpoint(websocket: WebSocket):
     """WebSocket for interactive chat about analysis results. Query param: job_id"""
     await websocket.accept()
     job_id = websocket.query_params.get("job_id", "")
+    conversation_history: list = []  # Memorie conversațională per sesiune
+
     try:
+        if not job_id:
+            await websocket.send_json({"type": "error", "message": "Job ID required"})
+            await websocket.close()
+            return
+
+        # Fetch job o singură dată la conectare pentru suggested questions
+        init_result = neo4j_conn.query("""
+            MATCH (j:Job {id: $job_id})
+            OPTIONAL MATCH (j)-[:RESULT]->(f:File)
+            RETURN j.filename as filename, j.result as result, j.mime_type as mime_type,
+                   j.osint_results as osint_results, j.osint_risk_level as osint_risk_level,
+                   f.verdict as verdict, f.reasoning as reasoning, f.confidence as confidence
+        """, {"job_id": job_id})
+
+        if init_result:
+            init_ctx = _build_chat_context(init_result[0])
+            suggested = _build_suggested_questions(init_ctx)
+            await websocket.send_json({
+                "type": "suggested_questions",
+                "questions": suggested
+            })
+
         while True:
             data = await websocket.receive_json()
-            user_question = data.get("message", "")
-            
-            if not job_id:
-                await websocket.send_json({"type": "error", "message": "Job ID required"})
+            user_question = data.get("message", "").strip()
+            if not user_question:
                 continue
-            
-            # Fetch job from Neo4j
+
+            # Fetch job context (actualizat pentru fiecare mesaj — OSINT poate fi completat mai târziu)
             result = neo4j_conn.query("""
-                MATCH (j:Job {id: $job_id})-[:RESULT]->(f:File)
-                RETURN j.filename as filename, f.verdict as verdict, f.reasoning as reasoning, f.confidence as confidence, j.result as result
+                MATCH (j:Job {id: $job_id})
+                OPTIONAL MATCH (j)-[:RESULT]->(f:File)
+                RETURN j.filename as filename, j.result as result, j.mime_type as mime_type,
+                       j.osint_results as osint_results, j.osint_risk_level as osint_risk_level,
+                       f.verdict as verdict, f.reasoning as reasoning, f.confidence as confidence
             """, {"job_id": job_id})
-            
-            if not result:
-                # Fallback: Job might not have RESULT yet, try OPTIONAL
-                result = neo4j_conn.query("""
-                    MATCH (j:Job {id: $job_id})
-                    OPTIONAL MATCH (j)-[:RESULT]->(f:File)
-                    RETURN j.filename as filename, f.verdict as verdict, f.reasoning as reasoning, f.confidence as confidence, j.result as result
-                """, {"job_id": job_id})
-            
+
             if not result:
                 await websocket.send_json({"type": "error", "message": "Job not found"})
                 continue
-            
-            job = result[0]
-            filename = job.get("filename", "Unknown")
-            verdict = job.get("verdict", "N/A")
-            reasoning = job.get("reasoning", "N/A")
-            confidence = job.get("confidence", 0) or 0
-            if confidence > 1:
-                confidence = confidence / 100
-            
-            # Extract from result JSON if verdict missing
-            raw_result = job.get("result")
-            if raw_result and not verdict:
-                try:
-                    parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-                    verdict = parsed.get("verdict", verdict)
-                    reasoning = parsed.get("reasoning", reasoning)
-                    confidence = parsed.get("confidence", confidence) or confidence
-                except Exception:
-                    pass
-            
-            prompt = f"""Răspunde în română la întrebarea: {user_question}
 
-Context analiză:
-- Fișier: {filename}
-- Verdict: {verdict}
-- Confidență: {confidence:.0%}
-- Raționament: {reasoning}
+            ctx = _build_chat_context(result[0])
 
-Explică de ce sistemul a ajuns la acest verdict."""
+            system_prompt = f"""Ești Cortex, asistentul AI forensic al platformei DeepGuard Pro.
+Răspunde ÎNTOTDEAUNA în română. Fii direct, bazat pe dovezi și concis (max 3-4 propoziții).
+Nu inventa informații — citează doar ce există în contextul de mai jos.
+
+=== CONTEXT ANALIZĂ ===
+Fișier: {ctx['filename']}
+Verdict final: {ctx['verdict']} (confidență: {ctx['confidence']:.0%})
+Agenți utilizați: {', '.join(ctx['agents_used']) if ctx['agents_used'] else 'N/A'}
+
+=== VERDICTS PER AGENT ===
+{ctx['agent_summary']}
+
+=== FINGERPRINT (model generativ detectat) ===
+{ctx['fingerprint_info']}
+
+=== GRAD-CAM (explainability vizuală) ===
+{ctx['gradcam_info']}
+
+=== FRAME ANALYSIS (primele 3 frame-uri suspecte) ===
+{ctx['frames_info']}
+
+=== INVESTIGAȚIE OSINT ===
+{ctx['osint_info']}
+
+=== RAȚIONAMENT NEURO-SIMBOLIC ===
+{ctx['reasoning'][:1500]}"""
+
+            conversation_history.append({"role": "user", "content": user_question})
+
+            # Limitează istoricul la ultimele 10 schimburi
+            history_to_send = conversation_history[-10:]
 
             try:
                 if openai_client:
                     ws_gpt_response = openai_client.chat.completions.create(
                         model=GPT4_VISION_MODEL,
                         messages=[
-                            {
-                                "role": "system",
-                                "content": (
-                                    "Ești Cortex, asistentul AI forensic al platformei DeepGuard Pro. "
-                                    "Răspunde ÎNTOTDEAUNA în română. Fii direct, bazat pe dovezi și concis. "
-                                    "Nu inventa informații — citează doar ce există în contextul primit."
-                                )
-                            },
-                            {"role": "user", "content": prompt}
+                            {"role": "system", "content": system_prompt},
+                            *history_to_send
                         ],
-                        max_tokens=512,
+                        max_tokens=600,
                         temperature=0.3,
                     )
                     reply = ws_gpt_response.choices[0].message.content or "Răspuns gol."
                 else:
-                    reply = "GPT-4o nu este disponibil. Verifică OPENAI_API_KEY."
+                    # Fallback Gemini dacă OpenAI nu e disponibil
+                    try:
+                        import google.generativeai as genai
+                        genai.configure(api_key=os.getenv("GEMINI_API_KEY", ""))
+                        g_model = genai.GenerativeModel("gemini-2.0-flash")
+                        g_resp = g_model.generate_content(
+                            f"{system_prompt}\n\nÎntrebare utilizator: {user_question}"
+                        )
+                        reply = g_resp.text or "Răspuns gol."
+                    except Exception:
+                        reply = (
+                            f"Analiza indică verdict **{ctx['verdict']}** cu confidență "
+                            f"{ctx['confidence']:.0%}. {ctx['reasoning'][:300]}"
+                        )
             except Exception as e:
-                logger.error(f"Chat WebSocket GPT-4o error: {e}")
-                reply = f"Eroare la procesare: {str(e)}"
-            
+                logger.error(f"Chat WebSocket AI error: {e}")
+                reply = f"Eroare temporară la procesare. Încearcă din nou."
+
+            conversation_history.append({"role": "assistant", "content": reply})
             await websocket.send_json({"type": "message", "content": reply})
+
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -1550,6 +1711,63 @@ async def get_daily_report(api_key: str = QueryParam(...)):
         "total_users": len(users),
         "generated_at": datetime.now().isoformat()
     }
+
+# ============================================================================
+# OSINT REPORT CALLBACK  (n8n → DeepGuard)
+# ============================================================================
+class OSINTReportPayload(BaseModel):
+    job_id: str
+    osint_results: Any
+    investigation_completed: str
+
+@app.post("/osint/report")
+async def receive_osint_report(payload: OSINTReportPayload, request: Request):
+    """
+    Callback endpoint apelat de n8n după finalizarea investigației OSINT.
+    Salvează rezultatele OSINT în Neo4j și actualizează job-ul.
+    Protejat cu X-Api-Key header.
+    """
+    # Validare API key
+    report_api_key = os.getenv("REPORT_API_KEY", "deepguard_report_2025")
+    api_key_header = request.headers.get("X-Api-Key", "")
+    if api_key_header != report_api_key:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+    job_id = payload.job_id
+    osint_results = payload.osint_results
+    completed_at = payload.investigation_completed
+
+    # Parsare osint_results dacă e string JSON
+    if isinstance(osint_results, str):
+        try:
+            osint_results = json.loads(osint_results)
+        except Exception:
+            pass
+
+    try:
+        neo4j_conn.query("""
+            MATCH (j:Job {id: $job_id})
+            SET j.osint_results = $osint_results,
+                j.osint_completed_at = $completed_at,
+                j.osint_risk_level = $risk_level
+        """, {
+            "job_id": job_id,
+            "osint_results": json.dumps(osint_results),
+            "completed_at": completed_at,
+            "risk_level": osint_results.get("risk_level", "UNKNOWN") if isinstance(osint_results, dict) else "UNKNOWN"
+        })
+
+        logger.info(f"✅ OSINT results saved for job {job_id} — risk: {osint_results.get('risk_level') if isinstance(osint_results, dict) else 'N/A'}")
+
+        return {
+            "status": "ok",
+            "job_id": job_id,
+            "osint_risk_level": osint_results.get("risk_level") if isinstance(osint_results, dict) else "UNKNOWN"
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Failed to save OSINT results for job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save OSINT results: {str(e)}")
 
 # ============================================================================
 # ADMIN ENDPOINTS
