@@ -27,8 +27,8 @@ services:
       - MAIL_USE_TLS=${MAIL_USE_TLS:-true}
       - MAIL_FROM=${MAIL_FROM}
       - ADMIN_EMAIL=${ADMIN_EMAIL}
-      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-email}
-      - N8N_OSINT_WEBHOOK_URL=${N8N_OSINT_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-osint}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/deepguard-email}
+      - N8N_OSINT_WEBHOOK_URL=${N8N_OSINT_WEBHOOK_URL:-http://n8n:5678/webhook/deepguard-osint}
       - REPORT_API_KEY=${REPORT_API_KEY:-deepguard_report_2025}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-deepguard123}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-patrick21.kugelman@gmail.com}
@@ -280,8 +280,8 @@ services:
       - MAIL_USE_TLS=${MAIL_USE_TLS:-true}
       - MAIL_FROM=${MAIL_FROM}
       - ADMIN_EMAIL=${ADMIN_EMAIL}
-      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-email}
-      - N8N_OSINT_WEBHOOK_URL=${N8N_OSINT_WEBHOOK_URL:-https://kugelman12patrick.app.n8n.cloud/webhook/deepguard-osint}
+      - N8N_WEBHOOK_URL=${N8N_WEBHOOK_URL:-http://n8n:5678/webhook/deepguard-email}
+      - N8N_OSINT_WEBHOOK_URL=${N8N_OSINT_WEBHOOK_URL:-http://n8n:5678/webhook/deepguard-osint}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8501}
       - REPORT_API_KEY=${REPORT_API_KEY:-deepguard_report_2025}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
@@ -380,6 +380,42 @@ services:
     depends_on:
       coordinator:
         condition: service_healthy
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: deepguard_n8n
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-deepguard123}
+      - N8N_LOG_LEVEL=warn
+      - GENERIC_TIMEZONE=Europe/Bucharest
+      - SERPER_API_KEY=${SERPER_API_KEY:-}
+      - SIGHTENGINE_API_USER=${SIGHTENGINE_API_USER:-}
+      - SIGHTENGINE_API_SECRET=${SIGHTENGINE_API_SECRET:-}
+      - DEEPGUARD_REPORT_API_KEY=${REPORT_API_KEY:-deepguard_report_2025}
+      - DEEPGUARD_CALLBACK_URL=http://coordinator:8000/osint/report
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-patrick21.kugelman@gmail.com}
+    volumes:
+      - ./n8n_data:/home/node/.n8n
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 networks:
   deepguard_net:

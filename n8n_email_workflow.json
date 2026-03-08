@@ -1,0 +1,237 @@
+{
+  "name": "DeepGuard Email Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "deepguard-email",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "1a2b3c4d-0001-0001-0001-000000000001",
+      "name": "Email Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "deepguard-email"
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "event_type",
+              "value": "={{ $json.type }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a2b3c4d-0002-0002-0002-000000000002",
+      "name": "Extract Event Type",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "value1": "={{ $json.event_type }}",
+              "operation": "equal",
+              "value2": "welcome"
+            },
+            {
+              "value1": "={{ $json.event_type }}",
+              "operation": "equal",
+              "value2": "login_alert"
+            },
+            {
+              "value1": "={{ $json.event_type }}",
+              "operation": "equal",
+              "value2": "analysis_complete"
+            }
+          ]
+        }
+      },
+      "id": "1a2b3c4d-0003-0003-0003-000000000003",
+      "name": "Route by Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "DeepGuard Pro <{{ $env.MAIL_FROM || 'noreply@deepguard.ai' }}>",
+        "toEmail": "={{ $node['Email Webhook'].json.to }}",
+        "subject": "👋 Bun venit în DeepGuard Pro!",
+        "emailFormat": "html",
+        "html": "<!DOCTYPE html>\n<html>\n<head><meta charset='utf-8'></head>\n<body style='font-family: Arial, sans-serif; background: #0d0d0d; color: #e0e0e0; padding: 20px;'>\n  <div style='max-width: 600px; margin: 0 auto; background: #1a1a2e; border: 1px solid #7c3aed; border-radius: 12px; padding: 30px;'>\n    <div style='text-align: center; margin-bottom: 25px;'>\n      <h1 style='color: #7c3aed; margin: 0;'>🛡️ DeepGuard Pro</h1>\n      <p style='color: #888; margin-top: 5px;'>Sistem Avansat de Detectare Deepfake</p>\n    </div>\n    <h2 style='color: #a78bfa;'>Bun venit, {{ $node['Email Webhook'].json.username }}! 👋</h2>\n    <p>Contul tău a fost creat cu succes pe platforma <strong>DeepGuard Pro</strong>.</p>\n    <p>Acum poți:</p>\n    <ul style='color: #ccc;'>\n      <li>📸 Analiza imagini, videoclipuri și fișiere audio pentru deepfake</li>\n      <li>🤖 Interoga Cortex AI pentru explicații detaliate</li>\n      <li>🔍 Monitoriza investigații OSINT automate</li>\n      <li>📊 Vizualiza heatmap-uri Grad-CAM și statistici forensice</li>\n    </ul>\n    <div style='text-align: center; margin: 30px 0;'>\n      <a href='{{ $node['Email Webhook'].json.login_url }}' style='background: #7c3aed; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; display: inline-block;'>🚀 Accesează Platforma</a>\n    </div>\n    <hr style='border-color: #333; margin: 25px 0;'>\n    <p style='font-size: 12px; color: #666; text-align: center;'>DeepGuard Pro — UTCN Thesis Project 2025 | Sistem Multi-Agent Neuro-Simbolic</p>\n  </div>\n</body>\n</html>"
+      },
+      "id": "1a2b3c4d-0004-0004-0004-000000000004",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [840, 120],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-deepguard",
+          "name": "DeepGuard SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "DeepGuard Security <{{ $env.MAIL_FROM || 'noreply@deepguard.ai' }}>",
+        "toEmail": "={{ $node['Email Webhook'].json.to }}",
+        "subject": "🔐 Alertă Securitate: Logare Nouă Detectată",
+        "emailFormat": "html",
+        "html": "<!DOCTYPE html>\n<html>\n<head><meta charset='utf-8'></head>\n<body style='font-family: Arial, sans-serif; background: #0d0d0d; color: #e0e0e0; padding: 20px;'>\n  <div style='max-width: 600px; margin: 0 auto; background: #1a1a2e; border: 1px solid #ef4444; border-radius: 12px; padding: 30px;'>\n    <div style='text-align: center; margin-bottom: 25px;'>\n      <h1 style='color: #7c3aed; margin: 0;'>🛡️ DeepGuard Pro</h1>\n    </div>\n    <h2 style='color: #ef4444;'>⚠️ Logare Nouă Detectată</h2>\n    <p>Salut <strong>{{ $node['Email Webhook'].json.username }}</strong>,</p>\n    <p>A fost detectată o nouă logare pe contul tău DeepGuard Pro.</p>\n    <table style='width: 100%; background: #0d0d0d; border-radius: 8px; padding: 15px; margin: 15px 0;'>\n      <tr><td style='color: #888; padding: 5px 0;'>👤 Utilizator:</td><td style='color: #fff; font-weight: bold;'>{{ $node['Email Webhook'].json.username }}</td></tr>\n      <tr><td style='color: #888; padding: 5px 0;'>🕐 Data/Ora:</td><td style='color: #fff;'>{{ $node['Email Webhook'].json.timestamp }}</td></tr>\n    </table>\n    <p style='color: #fca5a5;'>Dacă nu recunoști această logare, contactează imediat administratorul platformei.</p>\n    <hr style='border-color: #333; margin: 25px 0;'>\n    <p style='font-size: 12px; color: #666; text-align: center;'>DeepGuard Pro Security System — Notificare Automată</p>\n  </div>\n</body>\n</html>"
+      },
+      "id": "1a2b3c4d-0005-0005-0005-000000000005",
+      "name": "Send Login Alert Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [840, 300],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-deepguard",
+          "name": "DeepGuard SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "DeepGuard Pro <{{ $env.MAIL_FROM || 'noreply@deepguard.ai' }}>",
+        "toEmail": "={{ $node['Email Webhook'].json.to }}",
+        "subject": "={{ $node['Email Webhook'].json.verdict === 'FAKE' ? '🔴' : $node['Email Webhook'].json.verdict === 'REAL' ? '🟢' : '🟡' }} Analiză Finalizată: {{ $node['Email Webhook'].json.filename }}",
+        "emailFormat": "html",
+        "html": "<!DOCTYPE html>\n<html>\n<head><meta charset='utf-8'></head>\n<body style='font-family: Arial, sans-serif; background: #0d0d0d; color: #e0e0e0; padding: 20px;'>\n  <div style='max-width: 600px; margin: 0 auto; background: #1a1a2e; border: 1px solid {{ $node['Email Webhook'].json.verdict === 'FAKE' ? '#ef4444' : $node['Email Webhook'].json.verdict === 'REAL' ? '#22c55e' : '#f59e0b' }}; border-radius: 12px; padding: 30px;'>\n    <div style='text-align: center; margin-bottom: 25px;'>\n      <h1 style='color: #7c3aed; margin: 0;'>🛡️ DeepGuard Pro</h1>\n      <p style='color: #888; margin-top: 5px;'>Raport Forensic Automat</p>\n    </div>\n    <p>Analiza pentru fișierul <code style='background: #0d0d0d; padding: 2px 8px; border-radius: 4px; color: #a78bfa;'>{{ $node['Email Webhook'].json.filename }}</code> a fost finalizată.</p>\n    <div style='text-align: center; padding: 20px; background: #0d0d0d; border-radius: 8px; margin: 20px 0; border-left: 4px solid {{ $node['Email Webhook'].json.verdict === 'FAKE' ? '#ef4444' : $node['Email Webhook'].json.verdict === 'REAL' ? '#22c55e' : '#f59e0b' }};'>\n      <h2 style='color: {{ $node['Email Webhook'].json.verdict === 'FAKE' ? '#ef4444' : $node['Email Webhook'].json.verdict === 'REAL' ? '#22c55e' : '#f59e0b' }}; margin: 0; font-size: 28px;'>{{ $node['Email Webhook'].json.verdict === 'FAKE' ? '🔴 DEEPFAKE DETECTAT' : $node['Email Webhook'].json.verdict === 'REAL' ? '🟢 CONȚINUT AUTENTIC' : '🟡 NECONCLUDENT' }}</h2>\n      <p style='color: #888; margin-top: 8px;'>Confidență: <strong style='color: #fff;'>{{ $node['Email Webhook'].json.confidence }}%</strong></p>\n    </div>\n    <p><strong style='color: #a78bfa;'>Raționament AI:</strong></p>\n    <p style='background: #0d0d0d; padding: 12px; border-radius: 6px; color: #ccc; font-size: 14px; line-height: 1.6;'>{{ $node['Email Webhook'].json.reasoning.substring(0, 500) }}{{ $node['Email Webhook'].json.reasoning.length > 500 ? '...' : '' }}</p>\n    <div style='text-align: center; margin: 30px 0;'>\n      <a href='{{ $node['Email Webhook'].json.results_url }}' style='background: #7c3aed; color: white; padding: 14px 32px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; display: inline-block;'>🔍 Vezi Raportul Complet</a>\n    </div>\n    <p style='font-size: 12px; color: #666; text-align: center;'>Raportul include heatmap Grad-CAM, scoruri per agent, investigație OSINT și evidențe forensice.</p>\n    <hr style='border-color: #333; margin: 25px 0;'>\n    <p style='font-size: 11px; color: #444; text-align: center;'>DeepGuard Pro — Sistem Neural Multi-Agent | Job ID: {{ $node['Email Webhook'].json.job_id }}</p>\n  </div>\n</body>\n</html>"
+      },
+      "id": "1a2b3c4d-0006-0006-0006-000000000006",
+      "name": "Send Analysis Complete Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [840, 480],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-deepguard",
+          "name": "DeepGuard SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "accepted"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "1a2b3c4d-0007-0007-0007-000000000007",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [1040, 300]
+    }
+  ],
+  "connections": {
+    "Email Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extract Event Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Event Type": {
+      "main": [
+        [
+          {
+            "node": "Route by Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Type": {
+      "main": [
+        [
+          {
+            "node": "Send Welcome Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Login Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Analysis Complete Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Welcome Email": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Login Alert Email": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Analysis Complete Email": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "deepguard"
+    },
+    {
+      "name": "email"
+    }
+  ]
+}

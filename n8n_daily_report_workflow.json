@@ -1,0 +1,167 @@
+{
+  "name": "DeepGuard Daily Admin Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "2b3c4d5e-0001-0001-0001-000000000001",
+      "name": "Daily 08:00 Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://coordinator:8000/stats/report",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "queryAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "api_key",
+              "value": "={{ $env.DEEPGUARD_REPORT_API_KEY || 'deepguard_report_2025' }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "2b3c4d5e-0002-0002-0002-000000000002",
+      "name": "Fetch Stats from DeepGuard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "report_date",
+              "value": "={{ new Date().toLocaleDateString('ro-RO', {weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'}) }}"
+            },
+            {
+              "name": "total_analyses",
+              "value": "={{ $json.total_analyses || 0 }}"
+            },
+            {
+              "name": "fake_detected",
+              "value": "={{ $json.fake_detected || 0 }}"
+            },
+            {
+              "name": "real_confirmed",
+              "value": "={{ $json.real_confirmed || 0 }}"
+            },
+            {
+              "name": "inconclusive",
+              "value": "={{ $json.inconclusive || 0 }}"
+            },
+            {
+              "name": "fake_percentage",
+              "value": "={{ $json.fake_percentage || 0 }}"
+            },
+            {
+              "name": "average_confidence",
+              "value": "={{ $json.average_confidence || 0 }}"
+            },
+            {
+              "name": "total_users",
+              "value": "={{ $json.total_users || 0 }}"
+            },
+            {
+              "name": "generated_at",
+              "value": "={{ $json.generated_at || new Date().toISOString() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "2b3c4d5e-0003-0003-0003-000000000003",
+      "name": "Format Report Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "DeepGuard Pro <{{ $env.MAIL_FROM || 'noreply@deepguard.ai' }}>",
+        "toEmail": "={{ $env.ADMIN_EMAIL || 'admin@deepguard.ai' }}",
+        "subject": "📊 DeepGuard Pro — Raport Zilnic {{ $json.report_date }}",
+        "emailFormat": "html",
+        "html": "<!DOCTYPE html>\n<html>\n<head><meta charset='utf-8'></head>\n<body style='font-family: Arial, sans-serif; background: #0d0d0d; color: #e0e0e0; padding: 20px;'>\n  <div style='max-width: 650px; margin: 0 auto; background: #1a1a2e; border: 1px solid #7c3aed; border-radius: 12px; padding: 30px;'>\n    \n    <!-- Header -->\n    <div style='text-align: center; margin-bottom: 30px; border-bottom: 1px solid #333; padding-bottom: 20px;'>\n      <h1 style='color: #7c3aed; margin: 0; font-size: 24px;'>🛡️ DeepGuard Pro</h1>\n      <h2 style='color: #a78bfa; margin: 8px 0 0 0; font-size: 18px; font-weight: normal;'>📊 Raport Zilnic Administrator</h2>\n      <p style='color: #666; margin: 5px 0 0 0; font-size: 13px;'>{{ $json.report_date }}</p>\n    </div>\n\n    <!-- Stats Grid -->\n    <table style='width: 100%; border-collapse: collapse; margin-bottom: 25px;'>\n      <tr>\n        <td style='padding: 12px; background: #0d0d0d; border-radius: 8px; text-align: center; width: 25%;'>\n          <div style='font-size: 28px; font-weight: bold; color: #a78bfa;'>{{ $json.total_analyses }}</div>\n          <div style='font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase;'>Total Analize</div>\n        </td>\n        <td style='width: 4%;'></td>\n        <td style='padding: 12px; background: #0d0d0d; border-radius: 8px; text-align: center; width: 25%;'>\n          <div style='font-size: 28px; font-weight: bold; color: #ef4444;'>{{ $json.fake_detected }}</div>\n          <div style='font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase;'>Deepfake</div>\n        </td>\n        <td style='width: 4%;'></td>\n        <td style='padding: 12px; background: #0d0d0d; border-radius: 8px; text-align: center; width: 25%;'>\n          <div style='font-size: 28px; font-weight: bold; color: #22c55e;'>{{ $json.real_confirmed }}</div>\n          <div style='font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase;'>Autentice</div>\n        </td>\n        <td style='width: 4%;'></td>\n        <td style='padding: 12px; background: #0d0d0d; border-radius: 8px; text-align: center; width: 25%;'>\n          <div style='font-size: 28px; font-weight: bold; color: #f59e0b;'>{{ $json.inconclusive }}</div>\n          <div style='font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase;'>Neconcludent</div>\n        </td>\n      </tr>\n    </table>\n\n    <!-- Metrics -->\n    <div style='background: #0d0d0d; border-radius: 8px; padding: 20px; margin-bottom: 20px;'>\n      <h3 style='color: #a78bfa; margin: 0 0 15px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px;'>📈 Metrici Cheie</h3>\n      <table style='width: 100%;'>\n        <tr>\n          <td style='color: #888; padding: 6px 0; font-size: 13px;'>Rata de detecție deepfake</td>\n          <td style='color: #ef4444; font-weight: bold; text-align: right; font-size: 13px;'>{{ $json.fake_percentage }}%</td>\n        </tr>\n        <tr>\n          <td style='color: #888; padding: 6px 0; font-size: 13px;'>Confidență medie AI</td>\n          <td style='color: #a78bfa; font-weight: bold; text-align: right; font-size: 13px;'>{{ $json.average_confidence }}%</td>\n        </tr>\n        <tr>\n          <td style='color: #888; padding: 6px 0; font-size: 13px;'>Utilizatori activi</td>\n          <td style='color: #22c55e; font-weight: bold; text-align: right; font-size: 13px;'>{{ $json.total_users }}</td>\n        </tr>\n      </table>\n    </div>\n\n    <!-- Footer -->\n    <div style='text-align: center; margin-top: 20px;'>\n      <a href='http://localhost:8501' style='background: #7c3aed; color: white; padding: 10px 24px; text-decoration: none; border-radius: 6px; font-size: 13px; display: inline-block;'>🔗 Deschide Dashboard Admin</a>\n    </div>\n\n    <hr style='border-color: #333; margin: 25px 0;'>\n    <p style='font-size: 11px; color: #444; text-align: center;'>Generat automat de DeepGuard Pro n8n Pipeline | {{ $json.generated_at }}</p>\n  </div>\n</body>\n</html>"
+      },
+      "id": "2b3c4d5e-0004-0004-0004-000000000004",
+      "name": "Send Daily Report Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [840, 300],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-deepguard",
+          "name": "DeepGuard SMTP"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 08:00 Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Stats from DeepGuard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Stats from DeepGuard": {
+      "main": [
+        [
+          {
+            "node": "Format Report Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Report Data": {
+      "main": [
+        [
+          {
+            "node": "Send Daily Report Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Europe/Bucharest"
+  },
+  "tags": [
+    {
+      "name": "deepguard"
+    },
+    {
+      "name": "report"
+    },
+    {
+      "name": "admin"
+    }
+  ]
+}
