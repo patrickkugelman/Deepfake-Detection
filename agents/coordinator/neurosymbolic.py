@@ -31,12 +31,13 @@ logger = logging.getLogger("DeepGuard.NeuroSymbolic")
 #   - text: metadata/text cues, weakest signal → 0.8x
 # ---------------------------------------------------------------------------
 AGENT_WEIGHTS: Dict[str, float] = {
-    "video":         float(os.getenv("WEIGHT_VIDEO_AGENT",       "1.5")),
-    "bio":           float(os.getenv("WEIGHT_BIO_AGENT",         "1.2")),
-    "gemini_vision": float(os.getenv("WEIGHT_VISION_LLM_AGENT",  "1.3")),
-    "vision":        float(os.getenv("WEIGHT_VISION_AGENT",      "1.0")),
-    "audio":         float(os.getenv("WEIGHT_AUDIO_AGENT",       "1.0")),
-    "text":          float(os.getenv("WEIGHT_TEXT_AGENT",        "0.8")),
+    "video":         float(os.getenv("WEIGHT_VIDEO_AGENT",        "1.5")),
+    "bio":           float(os.getenv("WEIGHT_BIO_AGENT",          "1.2")),
+    "gemini_vision": float(os.getenv("WEIGHT_VISION_LLM_AGENT",   "1.3")),
+    "vision":        float(os.getenv("WEIGHT_VISION_AGENT",       "1.0")),
+    "audio":         float(os.getenv("WEIGHT_AUDIO_AGENT",        "1.0")),
+    "text":          float(os.getenv("WEIGHT_TEXT_AGENT",         "0.8")),
+    "fingerprint":   float(os.getenv("WEIGHT_FINGERPRINT_AGENT",  "1.1")),
 }
 logger.info(f"Agent weights: {AGENT_WEIGHTS}")
 
@@ -169,6 +170,28 @@ class NeuroSymbolicDebater:
                 f"fake_prob={result.get('fake_probability', 'N/A')}, "
                 f"computed_confidence={confidence:.2f}"
             )
+
+        # =============================================================
+        # 1b. Normalize fingerprint result to standard verdict format
+        # =============================================================
+        fp_res = agent_results.get("fingerprint", {})
+        if isinstance(fp_res, dict) and fp_res.get("detected_model") and "fingerprint" not in neural_verdicts:
+            fp_conf = float(fp_res.get("confidence", 0.0))
+            # Any identified generative model signature means synthetic content
+            if fp_conf >= 0.60:
+                agent_results["fingerprint"] = {
+                    "verdict": "FAKE",
+                    "fake_probability": round(fp_conf * 100, 1),
+                    "confidence": fp_conf,
+                    "details": f"Generative model fingerprint: {fp_res.get('detected_model')} ({fp_conf:.0%})"
+                }
+            else:
+                agent_results["fingerprint"] = {
+                    "verdict": "REAL",
+                    "fake_probability": round(fp_conf * 100, 1),
+                    "confidence": 1.0 - fp_conf,
+                    "details": f"No strong generative model signature detected ({fp_conf:.0%})"
+                }
 
         # =============================================================
         # 2. SynthID Ground Truth Override

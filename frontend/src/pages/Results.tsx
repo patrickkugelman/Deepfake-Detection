@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useRef } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { MainLayout } from '@/layouts/MainLayout';
 import { PageHeader } from '@/components/shared/PageHeader';
 import { MarkdownRenderer } from '@/components/shared/MarkdownRenderer';
@@ -344,7 +344,7 @@ export default function Results() {
                     const agentIsFake = verdict === 'FAKE' || verdict === 'SUSPICIOUS';
                     const isSuspicious = verdict === 'SUSPICIOUS';
 
-                    const iconMap: Record<string, any> = { vision: Eye, audio: Mic, video: Video, text: Type, gemini_vision: Bot, bio: Fingerprint };
+                    const iconMap: Record<string, any> = { vision: Eye, audio: Mic, video: Video, text: Type, gemini_vision: Bot, bio: Activity, fingerprint: Fingerprint };
                     const IconComp = iconMap[agentName] || Activity;
 
                     // Extract artifacts if available
@@ -429,13 +429,106 @@ export default function Results() {
               </Card>
             )}
 
+            {/* Source Attribution — GAN/Diffusion Model Fingerprinting */}
+            {(() => {
+              const fp = jobDetails?.result?.details?.fingerprint;
+              if (!fp || fp.verdict === 'ERROR' || fp.is_ai_generated === undefined) return null;
+              const allScores: Record<string, number> = fp.all_model_scores || {};
+              const topModel = fp.detected_model || 'Unknown';
+              const conf = typeof fp.confidence === 'number' ? (fp.confidence > 1 ? fp.confidence : fp.confidence * 100) : 0;
+              const colorBadge = fp.color_badge || '#6b7280';
+              const isGenerated = fp.is_ai_generated === true;
+              return (
+                <Card className="bg-card/40 backdrop-blur-md border-border shadow-xl">
+                  <CardHeader className="border-b border-border">
+                    <CardTitle className="flex items-center gap-2 text-lg">
+                      <Fingerprint className="h-6 w-6 text-purple-400" />
+                      Source Attribution — Fingerprint Spectral
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-5 px-6 space-y-4">
+                    {/* Detected model banner */}
+                    <div className={cn(
+                      "flex items-center justify-between p-4 rounded-xl border",
+                      isGenerated
+                        ? 'border-purple-500/30 bg-purple-950/20'
+                        : 'border-green-500/20 bg-green-950/10'
+                    )}>
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Model Generator Detectat</p>
+                        <p className="text-xl font-bold" style={{ color: colorBadge }}>
+                          {isGenerated ? topModel : 'Natural / Necunoscut'}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-0.5">{fp.model_description || ''}</p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-2xl font-mono font-bold" style={{ color: colorBadge }}>
+                          {conf.toFixed(1)}%
+                        </p>
+                        <p className="text-xs text-muted-foreground">confidence</p>
+                      </div>
+                    </div>
+
+                    {/* All model scores */}
+                    {Object.keys(allScores).length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Scoruri per Model</p>
+                        {Object.entries(allScores)
+                          .sort(([,a], [,b]) => (b as number) - (a as number))
+                          .map(([modelName, score]) => {
+                            const pct = typeof score === 'number' ? Math.min(100, score * 100) : 0;
+                            const isTop = modelName === topModel;
+                            return (
+                              <div key={modelName} className="flex items-center gap-3">
+                                <span className={cn("text-xs w-28 shrink-0", isTop ? 'font-bold text-foreground' : 'text-muted-foreground')}>
+                                  {modelName}
+                                </span>
+                                <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                                  <div
+                                    className="h-full rounded-full transition-all duration-700"
+                                    style={{ width: `${pct}%`, backgroundColor: isTop ? colorBadge : '#4b5563' }}
+                                  />
+                                </div>
+                                <span className={cn("text-xs font-mono w-12 text-right", isTop ? 'font-bold text-foreground' : 'text-muted-foreground')}>
+                                  {pct.toFixed(1)}%
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    )}
+
+                    {/* Spectral features */}
+                    {fp.spectral_features && (
+                      <div className="grid grid-cols-2 gap-2 pt-1">
+                        {[
+                          { label: 'DCT Concentration', val: fp.spectral_features.dct_energy_concentration },
+                          { label: 'FFT High-Freq', val: fp.spectral_features.fft_high_freq_ratio },
+                          { label: 'Spectral Entropy', val: fp.spectral_features.spectral_entropy },
+                          { label: 'Color Correlation', val: fp.spectral_features.color_channel_correlation },
+                        ].map(({ label, val }) => (
+                          <div key={label} className="rounded-lg bg-muted/40 px-3 py-2">
+                            <p className="text-[10px] text-muted-foreground">{label}</p>
+                            <p className="text-sm font-mono font-bold">{typeof val === 'number' ? val.toFixed(4) : '—'}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })()}
+
             {/* Evidence Gallery (Heatmaps & Annotated Frames) */}
             {(() => {
               const evidence: any[] = [];
               // Collect vision heatmaps (only those with a valid URL)
               const visionEvidence = jobDetails?.result?.details?.vision?.evidence;
               if (Array.isArray(visionEvidence)) {
-                evidence.push(...visionEvidence.filter((e: any) => e.url && String(e.url).startsWith('/')));
+                // Acceptă atât evidențe cu URL (heatmap clasic) cât și cu base64 (Grad-CAM)
+                evidence.push(...visionEvidence.filter((e: any) =>
+                  (e.url && String(e.url).startsWith('/')) || e.base64_image
+                ));
               }
               // Collect Gemini annotated frames with per-frame analysis
               const geminiFrames = jobDetails?.result?.annotated_frames || jobDetails?.result?.details?.gemini_vision?.annotated_frames;
@@ -490,11 +583,23 @@ export default function Results() {
                             {/* Image */}
                             <div className="relative bg-muted/50 aspect-video overflow-hidden">
                               <img
-                                src={item.url?.startsWith('http') ? item.url : `${DEEPGUARD_API_URL}${item.url}`}
+                                src={
+                                  item.base64_image
+                                    ? item.base64_image
+                                    : item.url?.startsWith('http')
+                                      ? item.url
+                                      : `${DEEPGUARD_API_URL}${item.url}`
+                                }
                                 alt={item.title || `Evidence ${idx + 1}`}
                                 className="w-full h-full object-contain opacity-95 group-hover:opacity-100 transition-opacity duration-300"
                                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                               />
+                              {/* Grad-CAM badge */}
+                              {item.type === 'grad_cam' && (
+                                <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-700/90 text-purple-100 border border-purple-400/30 backdrop-blur-sm">
+                                  Grad-CAM XAI
+                                </div>
+                              )}
 
                               {/* Verdict overlay badge (top-right) */}
                               {frameVerdict !== '' && (

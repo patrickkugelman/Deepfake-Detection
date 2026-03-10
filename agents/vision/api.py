@@ -393,64 +393,122 @@ async def analyze(file: UploadFile = File(...)) -> Dict[str, Any]:
             probs = torch.softmax(logits, dim=1)
             fake_prob = float(probs[0][1].item() * 100)
 
-            # --- Saliency Map Generation (Visual Explanation) ---
+            # --- Grad-CAM Generation (Gradient-weighted Class Activation Mapping) ---
             try:
-                # Backward pass to get gradients
-                score = logits[0][1] # Score for 'Fake' class
-                score.backward(retain_graph=False) # Free graph after backward
-                
-                # Compute Saliency
-                gradients = tensor.grad.data.abs()[0] # [C, H, W]
-                saliency, _ = torch.max(gradients, dim=0) # [H, W]
-                
-                # Normalize to 0-1
-                saliency = (saliency - saliency.min()) / (saliency.max() - saliency.min() + 1e-8)
-                
-                # Convert to heatmap using OpenCV
                 import cv2
-                
-                # Calculate hash for filename (hash of content)
-                # We can re-use file content from start of function if we hash it, 
-                # but simpler to use a timestamp or request ID if file_hash not provided.
-                # Let's import hashlib
                 import hashlib
+                import base64
+
+                # ── Grad-CAM hooks ──────────────────────────────────────────
+                # Găsim ultimul layer convoluțional din modelul timm Xception.
+                # timm expune conv_head (1×1 conv) sau blocks[-1] (ultimul block).
+                target_layer = None
+                if hasattr(model, 'conv_head'):
+                    target_layer = model.conv_head
+                elif hasattr(model, 'blocks') and len(model.blocks) > 0:
+                    target_layer = model.blocks[-1]
+
+                activations_store = {}
+                gradients_store = {}
+
+                def fwd_hook(module, inp, out):
+                    activations_store['value'] = out  # no detach — needed for backward()
+
+                def bwd_hook(module, grad_in, grad_out):
+                    gradients_store['value'] = grad_out[0].detach()
+
+                handles = []
+                if target_layer is not None:
+                    handles.append(target_layer.register_forward_hook(fwd_hook))
+                    handles.append(target_layer.register_full_backward_hook(bwd_hook))
+
+                # Re-run forward cu gradienți activați
+                tensor_grad = transform(image).unsqueeze(0)
+                tensor_grad.requires_grad_(True)
+                out2 = model(tensor_grad)
+                logits2 = out2[0] if isinstance(out2, tuple) else out2
+                score = logits2[0][1]  # Scorul clasei FAKE
+                model.zero_grad()
+                score.backward()
+
+                # Eliberăm hookurile
+                for h in handles:
+                    h.remove()
+
+                # ── Calculăm CAM ────────────────────────────────────────────
+                grad_cam_generated = False
+                if 'value' in activations_store and 'value' in gradients_store:
+                    acts = activations_store['value']   # [1, C, H, W]
+                    grads = gradients_store['value']    # [1, C, H, W]
+
+                    # Global Average Pooling pe gradienți → ponderi per canal
+                    weights = grads.mean(dim=(2, 3), keepdim=True)  # [1, C, 1, 1]
+
+                    # Combinare ponderată a activation maps
+                    cam = (weights * acts).sum(dim=1, keepdim=True)  # [1, 1, H, W]
+                    cam = torch.nn.functional.relu(cam)
+
+                    # Normalize la [0, 1]
+                    cam_min, cam_max = cam.min(), cam.max()
+                    if (cam_max - cam_min).item() > 1e-8:
+                        cam = (cam - cam_min) / (cam_max - cam_min)
+
+                    cam_np = cam.squeeze().cpu().numpy()  # [H, W]
+                    grad_cam_generated = True
+                else:
+                    # Fallback la gradient pe input dacă hookurile nu au funcționat
+                    if tensor_grad.grad is not None:
+                        gradients = tensor_grad.grad.data.abs()[0]
+                        cam_np, _ = torch.max(gradients, dim=0)
+                        cam_np = cam_np.cpu().numpy()
+                        cam_min, cam_max = cam_np.min(), cam_np.max()
+                        if cam_max - cam_min > 1e-8:
+                            cam_np = (cam_np - cam_min) / (cam_max - cam_min)
+                        grad_cam_generated = True
+                    else:
+                        cam_np = np.zeros((7, 7), dtype=np.float32)
+
+                # ── Generăm imaginea overlay ─────────────────────────────────
                 file_hash = hashlib.sha256(content).hexdigest()
-                
-                heatmap_filename = f"{file_hash}_heatmap.jpg"
+                heatmap_filename = f"{file_hash}_gradcam.jpg"
                 evidence_dir = "/app/data/evidence"
                 os.makedirs(evidence_dir, exist_ok=True)
                 heatmap_path = os.path.join(evidence_dir, heatmap_filename)
-                
-                # Resize saliency to original image size
-                # We need original image size. 
+
                 orig_w, orig_h = image.size
-                
-                heatmap_np = saliency.cpu().detach().numpy()
-                heatmap_np = (255 * heatmap_np).astype(np.uint8)
-                heatmap_resized = cv2.resize(heatmap_np, (orig_w, orig_h))
-                    
-                # Apply colormap
-                heatmap_color = cv2.applyColorMap(heatmap_resized, cv2.COLORMAP_JET)
-                
-                # Superimpose
-                image_np = np.array(image)[:, :, ::-1].copy() # RGB to BGR
-                overlay = cv2.addWeighted(image_np, 0.7, heatmap_color, 0.3, 0)
-                
+                cam_uint8 = (255 * cam_np).astype(np.uint8)
+                cam_resized = cv2.resize(cam_uint8, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+                heatmap_color = cv2.applyColorMap(cam_resized, cv2.COLORMAP_JET)
+
+                # Overlay pe imaginea originală (BGR)
+                image_bgr = np.array(image.convert("RGB"))[:, :, ::-1].copy()
+                overlay = cv2.addWeighted(image_bgr, 0.6, heatmap_color, 0.4, 0)
                 cv2.imwrite(heatmap_path, overlay)
-                logger.info(f"🎨 Saved saliency map: {heatmap_path}")
-                
-                # Evidence Item structure
+
+                # Encode base64 pentru răspuns direct în JSON
+                with open(heatmap_path, "rb") as f:
+                    heatmap_b64 = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode("utf-8")
+
+                logger.info(f"🎨 Grad-CAM saved: {heatmap_path} (layer_found={grad_cam_generated})")
+
                 evidence = [{
-                    "type": "heatmap",
-                    "title": "Saliency Map (AI Attention)",
-                    "description": "Red areas indicate regions that most influenced the AI's decision.",
+                    "type": "grad_cam",
+                    "title": "Grad-CAM — Hartă de Activare (Explainable AI)",
+                    "description": (
+                        "Zonele roșii/galbene indică regiunile care au influențat cel mai mult "
+                        "decizia rețelei neuronale pentru clasa FAKE. "
+                        "Grad-CAM (Gradient-weighted Class Activation Mapping) vizualizează "
+                        "atenția modelului Xception CNN."
+                    ),
                     "url": f"/evidence/{heatmap_filename}",
-                    "confidence": fake_prob
+                    "base64_image": heatmap_b64,
+                    "confidence": fake_prob,
+                    "method": "Grad-CAM" if grad_cam_generated and 'value' in activations_store else "Gradient-Input Fallback"
                 }]
             except Exception as viz_e:
-                logger.warning(f"Failed to generate saliency map: {viz_e}")
+                logger.warning(f"Failed to generate Grad-CAM: {viz_e}")
                 evidence = []
-            # ----------------------------------------------------
+            # ----------------------------------------------------------------
             
             logger.info(f"📊 Vision analysis - Fake probability: {fake_prob:.2f}%")
             

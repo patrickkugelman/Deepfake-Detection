@@ -201,7 +201,8 @@ AGENT_REGISTRY = {
     "audio": "http://deepguard_audio:8004/analyze",
     "video": "http://deepguard_video:8003/analyze",
     "bio": "http://deepguard_bio:8005/analyze",
-    "text": "http://deepguard_text:8001/analyze"
+    "text": "http://deepguard_text:8001/analyze",
+    "fingerprint": "http://deepguard_fingerprint:8006/analyze"
 }
 
 # ============================================================================
@@ -324,15 +325,15 @@ def select_agents_by_filetype(file_type: str, filename: str) -> List[str]:
     ext = file_type.lower()
     name_lower = (filename or "").lower()
     
-    # Image files → ONLY vision agent (PIL-based, cannot handle video)
+    # Image files → vision + fingerprint (PIL-based, cannot handle video)
     if any(x in ext for x in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']):
-        logger.info(f"📸 Image detected ({ext}). Routing to: vision agent ONLY")
-        return ["vision"]
-    
-    # Video files → video + bio + audio (audio track extracted by pipeline via ffmpeg)
+        logger.info(f"📸 Image detected ({ext}). Routing to: vision + fingerprint agents")
+        return ["vision", "fingerprint"]
+
+    # Video files → video + bio + audio + fingerprint (audio track extracted by pipeline via ffmpeg)
     elif any(x in ext for x in VIDEO_EXTENSIONS):
-        logger.info(f"🎬 Video detected ({ext}). Routing to: video, bio, audio agents")
-        return ["video", "bio", "audio"]
+        logger.info(f"🎬 Video detected ({ext}). Routing to: video, bio, audio, fingerprint agents")
+        return ["video", "bio", "audio", "fingerprint"]
     
     # Audio files
     elif any(x in ext for x in ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac']):
@@ -406,8 +407,6 @@ async def run_analysis_pipeline(
     # ========================================================================
     # STEP 3: Call Agent Services (50%)
     # ========================================================================
-    update_job_status(job_id, "processing", 50, f"Analiză cu {len(selected_agents)} agenți neurali...")
-
     # For video files: extract audio track for audio agent
     is_video = any(x in file_type.lower() for x in VIDEO_EXTENSIONS)
     audio_content = None
@@ -417,6 +416,7 @@ async def run_analysis_pipeline(
         if audio_content is None:
             logger.warning("⚠️ No audio extracted — removing audio agent from pipeline")
             selected_agents = [a for a in selected_agents if a != "audio"]
+    update_job_status(job_id, "processing", 50, f"Analiză cu {len(selected_agents)} agenți neurali...")
 
     # Build parallel tasks — audio agent gets extracted audio, others get original content
     tasks = []
@@ -644,31 +644,56 @@ async def run_analysis_pipeline(
             logger.error(f"❌ Neo4j fallback save failed: {e}")
     
     # ========================================================================
-    # STEP 7: Trigger OSINT Investigation (async, non-blocking)
+    # STEP 7: Save Fingerprint to Neo4j
     # ========================================================================
-    # Trigger n8n OSINT pipeline only for FAKE/SUSPICIOUS verdicts with images/video
-    n8n_osint_url = os.getenv("N8N_OSINT_WEBHOOK_URL", "")
-    if n8n_osint_url and final_verdict in ("FAKE", "SUSPICIOUS"):
+    fingerprint_result = agent_results.get("fingerprint", {})
+    if fingerprint_result and fingerprint_result.get("verdict") != "ERROR" and fingerprint_result.get("is_ai_generated") is not None:
         try:
-            import urllib.request
-            osint_payload = json.dumps({
-                "job_id": job_id,
-                "filename": filename,
-                "verdict": final_verdict,
-                "confidence": confidence,
-                "file_url": s3_url,
-                "file_hash": f_hash,
-                "callback_url": f"{os.getenv('COORDINATOR_URL', 'http://deepguard_brain:8000')}/osint/report",
-                "api_key": os.getenv("REPORT_API_KEY", "deepguard_report_2025")
-            }).encode()
-            req = urllib.request.Request(
-                n8n_osint_url,
-                data=osint_payload,
-                headers={"Content-Type": "application/json"},
-                method="POST"
+            from neo4j_manager import Neo4jManager  # type: ignore
+            neo4j_mgr = Neo4jManager()
+            spectral = fingerprint_result.get("spectral_features", {})
+            neo4j_mgr.save_fingerprint(
+                file_hash=f_hash,
+                model_type=fingerprint_result.get("detected_model", "Unknown"),
+                confidence=fingerprint_result.get("confidence", 0.0),
+                dct_concentration=spectral.get("dct_energy_concentration", 0.0),
+                fft_high_freq=spectral.get("fft_high_freq_ratio", 0.0),
+                spectral_entropy=spectral.get("spectral_entropy", 0.0),
+                color_correlation=spectral.get("color_channel_correlation", 0.0)
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                logger.info(f"🔍 OSINT investigation triggered for job {job_id} — n8n response: {resp.status}")
+            logger.info(f"🔬 Fingerprint saved: {fingerprint_result.get('detected_model')} for job {job_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ Fingerprint Neo4j save failed: {e}")
+
+    # ========================================================================
+    # STEP 7.5: Trigger n8n OSINT Investigation (dacă verdict == FAKE)
+    # ========================================================================
+    if final_verdict == "FAKE":
+        try:
+            _email_osint = email_tool
+            if _email_osint is None:
+                from email_notifier import EmailNotifier  # type: ignore
+                _email_osint = EmailNotifier()
+            if _email_osint:
+                user_email_for_osint = ""
+                try:
+                    ud = neo4j_conn.query(
+                        "MATCH (u:User {username: $u}) RETURN u.email as email",
+                        {"u": username.strip()}
+                    )
+                    user_email_for_osint = str(ud[0]['email']).strip() if ud and ud[0].get('email') else ""
+                except Exception:
+                    pass
+                _email_osint.send_osint_trigger(
+                    job_id=job_id,
+                    filename=filename,
+                    verdict=final_verdict,
+                    confidence=confidence * 100 if confidence <= 1.0 else confidence,
+                    file_hash=f_hash,
+                    user_email=user_email_for_osint,
+                    s3_url=s3_url
+                )
+                logger.info(f"🔍 OSINT investigation triggered for FAKE job {job_id}")
         except Exception as e:
             logger.warning(f"⚠️ OSINT trigger failed (non-critical): {e}")
 

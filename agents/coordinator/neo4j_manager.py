@@ -122,7 +122,7 @@ class Neo4jManager:
     def get_user_history(self, user_email: str):
         """Recuperează istoricul de scanări pentru un utilizator specific."""
         if not self.driver: return []
-        
+
         query = """
         MATCH (u:User {email: $email})-[:UPLOADED]->(f:File)
         RETURN f.filename as name, f.verdict as verdict, f.timestamp as date
@@ -130,7 +130,73 @@ class Neo4jManager:
         """
         try:
             with self.driver.session() as session:
-                return list(session.run(query, email=user_email))
+                return [record.data() for record in session.run(query, email=user_email)]
         except Exception as e:
             logger.error(f"⚠️ Failed to fetch history: {e}")
             return []
+
+    def save_fingerprint(self, file_hash: str, model_type: str, confidence: float,
+                         dct_concentration: float, fft_high_freq: float,
+                         spectral_entropy: float, color_correlation: float):
+        """
+        Salvează amprenta spectrală (GAN/Diffusion fingerprint) în Knowledge Graph.
+        Leagă fingerprint-ul de fișierul analizat.
+        """
+        if not self.driver:
+            logger.warning("⚠️ Neo4j unavailable — fingerprint not saved")
+            return
+
+        fp_id = f"fp_{file_hash[:12]}"
+        query = """
+        MERGE (f:File {hash: $hash})
+        MERGE (fp:Fingerprint {id: $fp_id})
+        SET fp.model_type            = $model_type,
+            fp.confidence            = $confidence,
+            fp.dct_energy_concentration = $dct_concentration,
+            fp.fft_high_freq_ratio   = $fft_high_freq,
+            fp.spectral_entropy      = $spectral_entropy,
+            fp.color_correlation     = $color_correlation,
+            fp.created_at            = datetime()
+        MERGE (f)-[:HAS_FINGERPRINT]->(fp)
+        """
+        try:
+            with self.driver.session() as session:
+                session.run(query,
+                            hash=file_hash,
+                            fp_id=fp_id,
+                            model_type=model_type,
+                            confidence=confidence,
+                            dct_concentration=dct_concentration,
+                            fft_high_freq=fft_high_freq,
+                            spectral_entropy=spectral_entropy,
+                            color_correlation=color_correlation)
+            logger.info(f"🔬 Fingerprint saved: {model_type} ({confidence:.1%}) for {file_hash[:8]}")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to save fingerprint: {e}")
+
+    def get_fingerprint_stats(self) -> dict:
+        """
+        Returnează statistici despre fingerprint-urile stocate.
+        Folosit pentru dashboard și rapoarte.
+        """
+        if not self.driver:
+            return {}
+
+        query = """
+        MATCH (fp:Fingerprint)
+        RETURN fp.model_type as model, count(fp) as count, avg(fp.confidence) as avg_conf
+        ORDER BY count DESC
+        """
+        try:
+            with self.driver.session() as session:
+                results = list(session.run(query))
+                return {
+                    row["model"]: {
+                        "count": row["count"],
+                        "avg_confidence": round(row["avg_conf"] or 0, 3)
+                    }
+                    for row in results if row["model"]
+                }
+        except Exception as e:
+            logger.error(f"⚠️ Failed to fetch fingerprint stats: {e}")
+            return {}

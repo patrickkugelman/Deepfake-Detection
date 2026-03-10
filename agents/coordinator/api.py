@@ -144,11 +144,12 @@ SECRET_KEY = os.getenv(
 ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 
 AGENT_REGISTRY = {
-    "vision": "http://deepguard_vision:8002/analyze",
-    "audio": "http://deepguard_audio:8004/analyze",
-    "video": "http://deepguard_video:8003/analyze",
-    "bio": "http://deepguard_bio:8005/analyze",
-    "text": "http://deepguard_text:8001/analyze"
+    "vision":       "http://deepguard_vision:8002/analyze",
+    "audio":        "http://deepguard_audio:8004/analyze",
+    "video":        "http://deepguard_video:8003/analyze",
+    "bio":          "http://deepguard_bio:8005/analyze",
+    "text":         "http://deepguard_text:8001/analyze",
+    "fingerprint":  "http://deepguard_fingerprint:8006/analyze",
 }
 
 logging.basicConfig(
@@ -366,9 +367,9 @@ async def select_agents_mcp(file_type: str, query: Optional[str]) -> List[str]:
     """Legacy agent selection — rule-based (no LLM needed)"""
     ft = file_type.lower()
     if any(ext in ft for ext in [".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv"]):
-        return ["video", "bio", "audio"]
+        return ["video", "bio", "audio", "fingerprint"]
     elif any(ext in ft for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]):
-        return ["vision"]
+        return ["vision", "fingerprint"]
     elif any(ext in ft for ext in [".mp3", ".wav", ".ogg", ".flac", ".m4a"]):
         return ["audio"]
     elif any(ext in ft for ext in [".txt", ".pdf", ".doc", ".docx"]):
@@ -1568,11 +1569,12 @@ async def health():
 
     # Ping each agent's /health endpoint in parallel
     health_endpoints = {
-        "vision": "http://deepguard_vision:8002/health",
-        "audio":  "http://deepguard_audio:8004/health",
-        "video":  "http://deepguard_video:8003/health",
-        "bio":    "http://deepguard_bio:8005/health",
-        "text":   "http://deepguard_text:8001/health",
+        "vision":      "http://deepguard_vision:8002/health",
+        "audio":       "http://deepguard_audio:8004/health",
+        "video":       "http://deepguard_video:8003/health",
+        "bio":         "http://deepguard_bio:8005/health",
+        "text":        "http://deepguard_text:8001/health",
+        "fingerprint": "http://deepguard_fingerprint:8006/health",
     }
 
     async def _check_agent(name: str, url: str) -> dict:
@@ -1745,6 +1747,7 @@ async def receive_osint_report(payload: OSINTReportPayload, request: Request):
             pass
 
     try:
+        # Actualizare job în Neo4j — adaugă câmpul osint_results
         neo4j_conn.query("""
             MATCH (j:Job {id: $job_id})
             SET j.osint_results = $osint_results,

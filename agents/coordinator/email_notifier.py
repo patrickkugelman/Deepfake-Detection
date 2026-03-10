@@ -23,10 +23,13 @@ class EmailNotifier:
         self.from_email = os.getenv("MAIL_FROM", self.user)
         # n8n webhook — dacă e setat, emailurile se trimit prin n8n (Gmail) în loc de SMTP direct
         self.n8n_webhook = os.getenv("N8N_WEBHOOK_URL", "").strip()
+        self.n8n_osint_webhook = os.getenv("N8N_OSINT_WEBHOOK_URL", "").strip()
         if self.n8n_webhook:
             logger.info(f"📨 Email mode: n8n webhook ({self.n8n_webhook})")
         else:
             logger.info(f"📨 Email mode: SMTP direct ({self.server}:{self.port})")
+        if self.n8n_osint_webhook:
+            logger.info(f"🔍 OSINT webhook configured: {self.n8n_osint_webhook}")
 
     def _send_via_n8n(self, payload: dict) -> bool:
         """Trimite payload JSON la n8n webhook. Returnează True dacă reușește."""
@@ -182,7 +185,7 @@ class EmailNotifier:
         """Trimite un mail utilizatorului cu rezultatul analizei + link direct + PDF atașat."""
         # --- n8n webhook ---
         if self.n8n_webhook:
-            base_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+            base_url = os.getenv("FRONTEND_URL", "http://localhost:8501")
             results_url = f"{base_url}/results/job-{job_id}" if job_id else f"{base_url}/dashboard"
             return self._send_via_n8n({
                 "type": "analysis_complete",
@@ -217,7 +220,7 @@ class EmailNotifier:
                 verdict_icon = "🟡"
 
             # Build results URL - direct link to job results
-            base_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+            base_url = os.getenv("FRONTEND_URL", "http://localhost:8501")
             if job_id:
                 results_url = f"{base_url}/results/job-{job_id}"
             else:
@@ -289,7 +292,7 @@ class EmailNotifier:
         """Trimite un email de bun venit la înregistrare. password_hint: optional, pentru demo/testing."""
         # --- n8n webhook ---
         if self.n8n_webhook:
-            base_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+            base_url = os.getenv("FRONTEND_URL", "http://localhost:8501")
             return self._send_via_n8n({
                 "type": "welcome",
                 "to": recipient_email,
@@ -320,7 +323,7 @@ class EmailNotifier:
                     <p>Acum poți accesa platforma pentru a detecta conținutul deepfake cu ajutorul inteligenței artificiale.</p>
                     <p>{login_instructions}</p>
                     <div style="text-align: center; margin-top: 30px;">
-                        <a href="{os.getenv('FRONTEND_URL', 'http://localhost:5173')}/login" style="background-color: #0056b3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Accesează Contul</a>
+                        <a href="{os.getenv('FRONTEND_URL', 'http://localhost:8501')}/login" style="background-color: #0056b3; color: white; padding: 12px 24px; text-decoration: none; border-radius: 4px; font-weight: bold;">Accesează Contul</a>
                     </div>
                     <hr style="margin-top: 30px; border: 0; border-top: 1px solid #eee;">
                     <p style="font-size: 12px; color: #999;">Dacă nu ai creat acest cont, ignoră acest mesaj.</p>
@@ -341,4 +344,55 @@ class EmailNotifier:
             return True
         except Exception as e:
             logger.error(f"❌ Failed to send welcome email: {e}")
+            return False
+
+    def send_osint_trigger(self, job_id: str, filename: str, verdict: str,
+                           confidence: float = 0.0, file_hash: str = "",
+                           user_email: str = "", s3_url: str = "") -> bool:
+        """
+        Declanșează un workflow n8n de investigație OSINT automat.
+        Se apelează doar când verdict == 'FAKE'.
+        Trimite un payload detaliat la N8N_OSINT_WEBHOOK_URL.
+        """
+        if not self.n8n_osint_webhook:
+            logger.debug("🔍 OSINT webhook not configured — skipping OSINT trigger")
+            return False
+        if verdict != "FAKE":
+            return False
+
+        base_url = os.getenv("FRONTEND_URL", "http://localhost:8501")
+        results_url = f"{base_url}/results/{job_id}"
+
+        payload = {
+            "type": "osint_investigation",
+            "job_id": job_id,
+            "filename": filename,
+            "verdict": verdict,
+            "confidence": round(confidence, 1),
+            "file_hash": file_hash,
+            "user_email": user_email,
+            "s3_url": s3_url,
+            "results_url": results_url,
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "investigation_tasks": [
+                "reverse_image_search",
+                "check_synthetic_media_db",
+                "timeline_analysis",
+                "generate_osint_report"
+            ]
+        }
+
+        try:
+            data = _json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.n8n_osint_webhook,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                logger.info(f"🔍 OSINT webhook OK ({resp.status}) for job {job_id}")
+                return True
+        except Exception as e:
+            logger.error(f"❌ OSINT webhook failed: {e}")
             return False

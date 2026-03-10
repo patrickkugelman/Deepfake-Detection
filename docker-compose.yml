@@ -207,6 +207,35 @@ services:
       retries: 3
       start_period: 30s
 
+  fingerprint_agent:
+    build:
+      context: ./agents/fingerprint
+      dockerfile: Dockerfile
+    container_name: deepguard_fingerprint
+    ports:
+      - "8006:8006"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - COORDINATOR_URL=http://deepguard_brain:8000
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-deepguard_secret}
+    volumes:
+      - ./data:/app/data
+      - ./agents/fingerprint:/app
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   neo4j:
     image: neo4j:5.15
     container_name: deepguard_neo4j
@@ -222,7 +251,7 @@ services:
       - deepguard_net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p deepguard_secret 'RETURN 1'"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-deepguard_secret} 'RETURN 1'"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -249,6 +278,7 @@ services:
       dockerfile: Dockerfile
     container_name: deepguard_celery_worker
     command: celery -A celery_tasks worker --loglevel=info --pool=solo --concurrency=2
+
     environment:
       - CELERY_BROKER_URL=redis://:${REDIS_PASSWORD:-deepguard_redis_secret}@redis:6379/0
       - CELERY_RESULT_BACKEND=redis://:${REDIS_PASSWORD:-deepguard_redis_secret}@redis:6379/0
@@ -297,9 +327,17 @@ services:
         condition: service_healthy
       seaweedfs:
         condition: service_started
+      fingerprint_agent:
+        condition: service_healthy
     networks:
       - deepguard_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery.*worker' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   celery_beat:
     build:
@@ -321,6 +359,12 @@ services:
     networks:
       - deepguard_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'celery.*beat' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   flower:
     build:
@@ -344,6 +388,12 @@ services:
     networks:
       - deepguard_net
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl --max-time 5 http://localhost:5555/ -o /dev/null && echo ok || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
 
   seaweedfs:
     image: chrislusf/seaweedfs:latest
@@ -358,11 +408,11 @@ services:
       - deepguard_net
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9333/cluster/status"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8333/"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
   ui:
     build:
@@ -406,16 +456,50 @@ services:
       - ./n8n_data:/home/node/.n8n
     networks:
       - deepguard_net
-    restart: unless-stopped
     depends_on:
       coordinator:
         condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget --spider -q http://localhost:5678/healthz || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  dtrack-apiserver:
+    image: dependencytrack/apiserver:latest
+    container_name: deepguard_dtrack_api
+    ports:
+      - "8081:8080"
+    environment:
+      - EXTRA_JAVA_OPTIONS=-Xmx4g
+      - ALPINE_DATABASE_MODE=internal
+    volumes:
+      - ./dependency-track:/data
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s
+
+  dtrack-frontend:
+    image: dependencytrack/frontend:latest
+    container_name: deepguard_dtrack_ui
+    ports:
+      - "8082:8080"
+    environment:
+      - API_BASE_URL=http://localhost:8081
+    networks:
+      - deepguard_net
+    depends_on:
+      dtrack-apiserver:
+        condition: service_started
+    restart: unless-stopped
 
 networks:
   deepguard_net:

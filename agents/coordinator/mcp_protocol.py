@@ -276,8 +276,31 @@ class MCPRegistry:
                 endpoint="http://deepguard_text:8001/analyze",
                 health_endpoint="http://deepguard_text:8001/health"
             ),
+            MCPTool(
+                name="fingerprint",
+                display_name="Fingerprint Agent",
+                description="Detects AI-generated media using spectral analysis, DCT patterns and frequency domain forensics",
+                version="2.0.0",
+                agent_type=AgentType.NEURAL,
+                modality=ModalityType.MULTIMODAL,
+                capabilities=[
+                    MCPCapability(name="spectral_fingerprinting", description="Identifies GAN/diffusion model signatures via DCT/FFT", confidence_threshold=0.75),
+                    MCPCapability(name="model_attribution", description="Attributes media to specific generative models", confidence_threshold=0.70),
+                    MCPCapability(name="frequency_forensics", description="Analyzes high-frequency artifacts invisible to human eye", confidence_threshold=0.80),
+                ],
+                input_schema=MCPInputSchema(
+                    modality=ModalityType.MULTIMODAL,
+                    formats=["jpg", "jpeg", "png", "mp4", "avi", "mov", "webm"],
+                    max_size_mb=500
+                ),
+                output_schema=MCPOutputSchema(
+                    additional_fields=["detected_model", "spectral_features", "is_ai_generated"]
+                ),
+                endpoint="http://deepguard_fingerprint:8006/analyze",
+                health_endpoint="http://deepguard_fingerprint:8006/health"
+            ),
         ]
-        
+
         # Register all default agents
         for agent in default_agents:
             self.register_tool(agent)
