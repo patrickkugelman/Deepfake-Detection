@@ -19,12 +19,27 @@ processors:
     timeout: 5s
 
 exporters:
-  # Log traces/metrics/logs to console (development mode)
+  # Console (debug) — vizibil în: docker logs deepguard_otel_collector
   debug:
     verbosity: basic
 
-  # SigNoz Cloud / self-hosted — activat dacă SIGNOZ_ENDPOINT e setat
-  otlp/signoz:
+  # SigNoz Self-Hosted (local Docker) — principal
+  otlp/signoz-local:
+    endpoint: signoz_otelcol:4317
+    tls:
+      insecure: true
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 100
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+
+  # SigNoz Cloud (backup) — activat dacă SIGNOZ_INGESTION_KEY e setat în .env
+  otlp/signoz-cloud:
     endpoint: ${env:SIGNOZ_ENDPOINT}
     headers:
       signoz-ingestion-key: ${env:SIGNOZ_INGESTION_KEY}
@@ -32,12 +47,12 @@ exporters:
       insecure: false
     sending_queue:
       enabled: true
-      num_consumers: 4
-      queue_size: 100
+      num_consumers: 2
+      queue_size: 50
     retry_on_failure:
       enabled: true
 
-  # Prometheus metrics endpoint (scrape at :8889/metrics)
+  # Prometheus metrics scrape endpoint (:8889/metrics)
   prometheus:
     endpoint: "0.0.0.0:8889"
     resource_to_telemetry_conversion:
@@ -57,7 +72,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug, otlp/signoz]
+      exporters: [debug, otlp/signoz-local]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
@@ -65,4 +80,4 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug, otlp/signoz]
+      exporters: [debug, otlp/signoz-local]

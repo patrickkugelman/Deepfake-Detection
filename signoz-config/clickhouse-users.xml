@@ -1,0 +1,19 @@
+<clickhouse>
+    <profiles>
+        <default>
+            <!-- Permite tipul JSON experimental necesar pentru SigNoz schema migrator -->
+            <allow_experimental_json_type>1</allow_experimental_json_type>
+        </default>
+    </profiles>
+    <users>
+        <default>
+            <password></password>
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <access_management>1</access_management>
+        </default>
+    </users>
+</clickhouse>

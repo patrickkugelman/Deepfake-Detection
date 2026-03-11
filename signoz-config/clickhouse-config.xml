@@ -1,0 +1,64 @@
+<clickhouse>
+    <!-- Forteaza IPv4 (IPv6 dezactivat in WSL2/Docker Desktop) -->
+    <listen_host>0.0.0.0</listen_host>
+
+    <!-- Cluster single-node pentru schema migrator SigNoz -->
+    <remote_servers>
+        <cluster>
+            <shard>
+                <replica>
+                    <host>signoz-clickhouse</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </cluster>
+    </remote_servers>
+
+    <!-- Macros pentru tabele Distributed -->
+    <macros>
+        <shard>01</shard>
+        <replica>signoz-clickhouse</replica>
+    </macros>
+
+    <!-- ClickHouse Keeper (inlocuitor ZooKeeper, built-in) -->
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <coordination_settings>
+            <operation_timeout_ms>10000</operation_timeout_ms>
+            <session_timeout_ms>30000</session_timeout_ms>
+            <raft_logs_level>warning</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+            <server>
+                <id>1</id>
+                <hostname>signoz-clickhouse</hostname>
+                <port>9234</port>
+            </server>
+        </raft_configuration>
+    </keeper_server>
+
+    <!-- ZooKeeper config (pointeaza la Keeper local) -->
+    <zookeeper>
+        <node>
+            <host>signoz-clickhouse</host>
+            <port>9181</port>
+        </node>
+    </zookeeper>
+
+    <logger>
+        <level>warning</level>
+        <console>true</console>
+    </logger>
+    <!-- Dezactivam log-urile verbose pentru a economisi spatiu -->
+    <query_thread_log remove="remove"/>
+    <query_log remove="remove"/>
+    <text_log remove="remove"/>
+    <trace_log remove="remove"/>
+    <metric_log remove="remove"/>
+    <asynchronous_metric_log remove="remove"/>
+    <session_log remove="remove"/>
+    <part_log remove="remove"/>
+</clickhouse>

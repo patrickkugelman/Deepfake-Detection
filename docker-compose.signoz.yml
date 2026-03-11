@@ -1,0 +1,122 @@
+# ============================================================================
+# SigNoz Self-Hosted Observability Stack
+# Echivalent Python al ghidului Java/Maven de la firmă
+#
+# Pornire:
+#   docker compose -f docker-compose.signoz.yml up -d
+#
+# UI: http://localhost:3301
+# ============================================================================
+
+services:
+  # ── ClickHouse (storage backend pentru SigNoz) ────────────────────────────
+  signoz-clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: signoz_clickhouse
+    hostname: signoz-clickhouse
+    volumes:
+      - signoz_clickhouse_data:/var/lib/clickhouse
+      - ./signoz-config/clickhouse-config.xml:/etc/clickhouse-server/config.d/config.xml:ro
+      - ./signoz-config/clickhouse-users.xml:/etc/clickhouse-server/users.d/users.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Schema Migrator (creaza tabelele ClickHouse, ruleaza o singura data) ──
+  signoz-schema-migrator:
+    image: signoz/signoz-schema-migrator:latest
+    container_name: signoz_schema_migrator
+    command:
+      - "sync"
+      - "--dsn=tcp://signoz-clickhouse:9000"
+      - "--dev"
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+    networks:
+      - deepguard_net
+    restart: on-failure
+
+  # ── SigNoz OTEL Collector (primeste date de la otel-collector principal) ──
+  signoz-otelcol:
+    image: signoz/signoz-otel-collector:latest
+    container_name: signoz_otelcol
+    hostname: signoz-otelcol
+    command: ["--config=/etc/otelcol-config.yml"]
+    volumes:
+      - ./signoz-config/otelcol-config.yml:/etc/otelcol-config.yml:ro
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+      signoz-schema-migrator:
+        condition: service_completed_successfully
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+
+  # ── SigNoz Query Service (API backend) ────────────────────────────────────
+  signoz-query-service:
+    image: signoz/query-service:latest
+    container_name: signoz_query_service
+    hostname: query-service
+    volumes:
+      - ./signoz-config/prometheus.yml:/root/config/prometheus.yml:ro
+      - signoz_sqlite:/var/lib/signoz
+    environment:
+      - ClickHouseUrl=tcp://signoz-clickhouse:9000
+      - STORAGE=clickhouse
+      - GODEBUG=netdns=go
+      - TELEMETRY_ENABLED=false
+      - DEPLOYMENT_TYPE=docker-standalone-amd
+      - SIGNOZ_LOCAL_DB_PATH=/var/lib/signoz/signoz.db
+    depends_on:
+      signoz-clickhouse:
+        condition: service_healthy
+      signoz-schema-migrator:
+        condition: service_completed_successfully
+    ports:
+      - "8090:8080"    # API SigNoz (8080 poate fi ocupat — mapam pe 8090)
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/api/v1/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── SigNoz Frontend (UI la http://localhost:3301) ─────────────────────────
+  signoz-frontend:
+    image: signoz/frontend:latest
+    container_name: signoz_frontend
+    hostname: signoz-frontend
+    environment:
+      - FRONTEND_API_ENDPOINT=http://query-service:8080
+    depends_on:
+      signoz-query-service:
+        condition: service_healthy
+    ports:
+      - "3301:3301"
+    networks:
+      - deepguard_net
+    restart: unless-stopped
+
+volumes:
+  signoz_clickhouse_data:
+  signoz_sqlite:
+
+networks:
+  deepguard_net:
+    external: true
+    name: deepfake-detector-structure_deepguard_net
