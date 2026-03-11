@@ -49,6 +49,12 @@ services:
       - DEMO_USERNAME=${DEMO_USERNAME:-Stefan}
       - DEMO_EMAIL=${DEMO_EMAIL:-patrick21.kugelman@gmail.com}
       - DEMO_PASSWORD=${DEMO_PASSWORD:-deepguard123}
+      # ── OpenTelemetry / SigNoz ──────────────────────────────────────────────
+      - OTEL_SERVICE_NAME=deepguard-coordinator
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_PYTHON_LOG_CORRELATION=true
+      - OTEL_RESOURCE_ATTRIBUTES=deployment.environment=production,service.version=1.0.0
     volumes:
       - ./data:/app/data
       - ./agents/coordinator:/app/agents/coordinator
@@ -317,6 +323,11 @@ services:
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # ── OpenTelemetry / SigNoz ──────────────────────────────────────────────
+      - OTEL_SERVICE_NAME=deepguard-celery-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+      - OTEL_PYTHON_LOG_CORRELATION=true
     volumes:
       - ./data:/app/data
       - ./agents/coordinator:/app/agents/coordinator
@@ -501,6 +512,24 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  # ── SigNoz Observability ───────────────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: deepguard_otel_collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus metrics scrape
+      - "13133:13133" # Health check
+    environment:
+      - SIGNOZ_ENDPOINT=${SIGNOZ_ENDPOINT:-https://ingest.eu.signoz.cloud:443}
+      - SIGNOZ_INGESTION_KEY=${SIGNOZ_INGESTION_KEY:-}
+    networks:
+      - deepguard_net
+    restart: unless-stopped
 networks:
   deepguard_net:
     driver: bridge

@@ -117,3 +117,9 @@ reports/
 
 # ── Fișiere PDF generate ──
 *.pdf
+dependency-track/
+n8n_data/
+docker-compose.dtrack.yml
+requirements_frozen.txt
+*.pyc
+__pycache__/

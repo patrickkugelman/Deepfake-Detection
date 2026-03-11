@@ -115,7 +115,17 @@ except Exception as _oe:
     logging.error(f"❌ OpenAI client init failed: {_oe}")
     openai_client = None
 
-# --- 8. APP INITIALIZATION ---
+# --- 8. OpenTelemetry / SigNoz INITIALIZATION ---
+try:
+    from otel_setup import setup_otel, get_tracer  # type: ignore
+    _otel_enabled = setup_otel("deepguard-coordinator")
+    _tracer = get_tracer("deepguard.coordinator") if _otel_enabled else None
+except Exception as _otel_err:
+    logging.warning(f"⚠️  OTEL setup skipped: {_otel_err}")
+    _otel_enabled = False
+    _tracer = None
+
+# --- 9. APP INITIALIZATION ---
 app = FastAPI(
     title="DeepGuard Pro Coordinator",
     description="Neural Multi-Agent Deepfake Detection System",
@@ -130,6 +140,15 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
     allow_credentials=True
 )
+
+# Instrumentare automată FastAPI cu OTEL (traces per request)
+if _otel_enabled:
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # type: ignore
+        FastAPIInstrumentor.instrument_app(app)
+        logging.info("✅ FastAPI OTEL instrumentation activ")
+    except Exception as _fi_err:
+        logging.warning(f"⚠️  FastAPI OTEL instrumentor: {_fi_err}")
 
 if mcp_router:
     app.include_router(mcp_router)
@@ -157,6 +176,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger("DeepGuard.Coordinator")
+
+# OTEL metric counters (inițializate în startup_event dacă OTEL e activ)
+_analyses_counter = None
+_fake_counter = None
+_real_counter = None
 
 # ============================================================================
 # STATIC FILES: Annotated evidence frames from Gemini Vision
@@ -313,6 +337,33 @@ async def startup_event():
     except Exception as e:
         logger.error(f"❌ Admin user init failed: {e}")
     logger.info("🚀 DeepGuard Pro Coordinator started")
+
+    # ── OTEL Custom Metrics ──────────────────────────────────────────────────
+    if _otel_enabled:
+        try:
+            from otel_setup import get_meter  # type: ignore
+            meter = get_meter("deepguard.coordinator")
+            if meter:
+                # Counter: număr total de analize
+                global _analyses_counter, _fake_counter, _real_counter
+                _analyses_counter = meter.create_counter(
+                    "deepguard.analyses.total",
+                    unit="1",
+                    description="Total media analyses submitted"
+                )
+                _fake_counter = meter.create_counter(
+                    "deepguard.verdicts.fake",
+                    unit="1",
+                    description="Total FAKE verdicts issued"
+                )
+                _real_counter = meter.create_counter(
+                    "deepguard.verdicts.real",
+                    unit="1",
+                    description="Total REAL verdicts issued"
+                )
+                logger.info("✅ OTEL custom metrics registered")
+        except Exception as _m_err:
+            logger.warning(f"⚠️  OTEL custom metrics: {_m_err}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -758,7 +809,13 @@ async def chat_analyze(
         )
         
         logger.info(f"🚀 Celery task dispatched: {task.id} for job {job_id}")
-        
+
+        # OTEL: incrementează counter analize
+        try:
+            _analyses_counter.add(1, {"file_type": file_type, "service": "coordinator"})
+        except Exception:
+            pass
+
         neo4j_conn.query("""
             MATCH (j:Job {id: $job_id})
             SET j.celery_task_id = $task_id, j.status = 'queued'
