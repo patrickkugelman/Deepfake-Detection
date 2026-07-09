@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
-import { WS_URL, API_URL } from '@/api';
+import { WS_URL, API_URL, getMyActiveJobs, ActiveJob } from '@/api';
 
 interface WSMessage {
   type: string;
@@ -27,6 +27,7 @@ interface WebSocketContextType {
   resetAnalysis: () => void;
   completedJobId: string | null;  // When analysis completes, for redirect
   clearCompletedJob: () => void;
+  activeJobs: ActiveJob[];  // Jobs active on the account (e.g. started in another tab), from REST poll
 }
 
 export const WebSocketContext = createContext<WebSocketContextType | undefined>(undefined);
@@ -49,12 +50,30 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   });
   const [completedJobId, setCompletedJobId] = useState<string | null>(null);
+  const [activeJobs, setActiveJobs] = useState<ActiveJob[]>([]);
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const tokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     sessionStorage.setItem('analysisState', JSON.stringify(analysisState));
   }, [analysisState]);
+
+  // Single account-wide poll for active jobs (e.g. started in another tab/session)
+  useEffect(() => {
+    const fetchActive = async () => {
+      if (!localStorage.getItem('token')) return;
+      try {
+        const jobs = await getMyActiveJobs();
+        setActiveJobs(jobs);
+      } catch {
+        // silently fail
+      }
+    };
+
+    fetchActive();
+    const interval = setInterval(fetchActive, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Background polling when job is in progress (persists across page navigation)
   const jobId = analysisState.jobId;
@@ -248,7 +267,8 @@ export const WebSocketProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setAnalysisState, 
       resetAnalysis,
       completedJobId,
-      clearCompletedJob
+      clearCompletedJob,
+      activeJobs
     }}>
       {children}
     </WebSocketContext.Provider>

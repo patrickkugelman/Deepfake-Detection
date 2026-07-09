@@ -108,6 +108,7 @@ export interface JobDetails {
   verdict?: "REAL" | "FAKE" | "SUSPICIOUS" | "INCONCLUSIVE";
   confidence?: number;
   reasoning?: string;
+  error?: string;
 
   // File metadata
   filename: string;

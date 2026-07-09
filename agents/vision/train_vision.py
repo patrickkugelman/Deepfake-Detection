@@ -21,21 +21,27 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Deepfake Vision Training")
-    parser.add_argument("--data_dir", type=str, default="dataset", help="Path to dataset root (must contain Train/Validation/Test)")
+    parser.add_argument("--data_dir", type=str, default="dataset", help="Path to dataset root (must contain Train/Val/Test)")
     parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
+    parser.add_argument("--freeze_epochs", type=int, default=3, help="Number of epochs to freeze the backbone (train only classifier head)")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--output_dir", type=str, default="models", help="Directory to save models and logs")
+    parser.add_argument("--workers", type=int, default=6,
+                        help="DataLoader worker processes. Set to 0 if debugging or freezing on Windows.")
     return parser.parse_args()
 
 def setup_logging(output_dir):
     os.makedirs(output_dir, exist_ok=True)
+    _reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8", errors="replace")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
         handlers=[
-            logging.FileHandler(os.path.join(output_dir, "train.log")),
+            logging.FileHandler(os.path.join(output_dir, "train.log"), encoding="utf-8"),
             logging.StreamHandler(sys.stdout)
         ]
     )
@@ -43,8 +49,8 @@ def setup_logging(output_dir):
 def set_seed(seed):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
     import random
     import numpy as np
     random.seed(seed)
@@ -98,7 +104,9 @@ def get_transforms(is_train=True, img_size=299):
             transforms.Resize((img_size, img_size)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomRotation(15),
-            # transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2), # Optional
+            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+            transforms.GaussianBlur(kernel_size=(5, 9), sigma=(0.1, 2.0)), 
+            transforms.RandomAdjustSharpness(sharpness_factor=2, p=0.5),
             transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
@@ -135,37 +143,32 @@ def main():
     logging.info(f"Device: {device}")
     logging.info(f"Args: {args}")
 
-    # Initialize Datasets and Loaders
+    # Initialize Datasets and Loaders - Updated 'Val' to match folder structure
     train_ds = DeepfakeDataset(args.data_dir, split='Train', transform=get_transforms(is_train=True))
-    val_ds = DeepfakeDataset(args.data_dir, split='Validation', transform=get_transforms(is_train=False))
-    
-    # Check if dataloaders are empty
+    val_ds = DeepfakeDataset(args.data_dir, split='Val', transform=get_transforms(is_train=False))
+    test_ds = DeepfakeDataset(args.data_dir, split='Test', transform=get_transforms(is_train=False))
+
     if len(train_ds) == 0 or len(val_ds) == 0:
         logging.error("Datasets are empty. Exiting.")
         sys.exit(1)
 
-    # Windows compatibility: num_workers=0 on Windows to avoid multiprocessing issues
-    import platform
-    num_workers = 0 if platform.system() == 'Windows' else 4
+    num_workers = args.workers
     pin_memory = True if torch.cuda.is_available() else False
-    
-    logging.info(f"DataLoader config: num_workers={num_workers}, pin_memory={pin_memory}")
-    
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, 
-                              num_workers=num_workers, pin_memory=pin_memory)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, 
-                            num_workers=num_workers, pin_memory=pin_memory)
+    persistent_workers = True if num_workers > 0 else False
 
-    # Model
+    logging.info(f"DataLoader config: num_workers={num_workers}, pin_memory={pin_memory}, persistent_workers={persistent_workers}")
+
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent_workers)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                            num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent_workers)
+    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
+                             num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent_workers)
+
     logging.info(f"Initializing Xception model...")
-    sys.stdout.flush()  # Ensure output is flushed immediately
+    sys.stdout.flush() 
     
     try:
-        logging.info("Loading Xception from timm (downloading pretrained weights if needed)...")
-        logging.info("Note: First-time download may take several minutes depending on internet speed")
-        sys.stdout.flush()
-        
-        # Create model with error handling
         model = timm.create_model('xception', pretrained=True, num_classes=2, drop_rate=0.5)
         logging.info("✅ Xception model architecture created")
         sys.stdout.flush()
@@ -174,24 +177,15 @@ def main():
         logging.info(f"✅ Model moved to device: {device}")
         sys.stdout.flush()
         
-        # Test forward pass to ensure model works
-        logging.info("Testing model forward pass...")
+        # Test forward pass
         test_input = torch.randn(1, 3, 299, 299).to(device)
         with torch.no_grad():
             test_output = model(test_input)
         logging.info(f"✅ Model forward pass successful. Output shape: {test_output.shape}")
         sys.stdout.flush()
         
-    except KeyboardInterrupt:
-        logging.error("Model initialization interrupted by user")
-        sys.stdout.flush()
-        sys.exit(1)
     except Exception as e:
         logging.error(f"❌ Failed to initialize Xception model: {e}")
-        logging.error(f"Error type: {type(e).__name__}")
-        import traceback
-        logging.error(traceback.format_exc())
-        sys.stdout.flush()
         sys.exit(1)
     
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -206,6 +200,20 @@ def main():
     
     try:
         for epoch in range(args.epochs):
+            
+            # Fine-tuning logic: Freeze/Unfreeze backbone
+            if epoch < args.freeze_epochs:
+                if epoch == 0:
+                    logging.info(f"❄️ Freezing backbone for {args.freeze_epochs} epochs. Training only classifier...")
+                for param in model.parameters():
+                    param.requires_grad = False
+                for param in model.get_classifier().parameters():
+                    param.requires_grad = True
+            elif epoch == args.freeze_epochs:
+                logging.info("🔥 Unfreezing backbone. Full network fine-tuning starting...")
+                for param in model.parameters():
+                    param.requires_grad = True
+
             model.train()
             train_loss = 0.0
             correct = 0; total = 0
@@ -242,8 +250,6 @@ def main():
                 for imgs, labels in val_loader:
                     imgs, labels = imgs.to(device), labels.to(device)
                     outputs = model(imgs)
-                    # Compute val loss for logging
-                    # Note: using same criterion (LabelSmoothing) or simple CrossEntropy
                     loss = criterion(outputs, labels) 
                     val_loss_acc += loss.item()
 
@@ -264,21 +270,53 @@ def main():
                 best_acc = val_acc
                 best_path = os.path.join(args.output_dir, "best_vision_model.pth")
                 torch.save(model.state_dict(), best_path)
-                logging.info(f"New Best Model Saved: {best_acc:.2f}%")
+                logging.info(f"⭐ New Best Model Saved: {best_acc:.2f}%")
             
             # Save Last
             last_path = os.path.join(args.output_dir, "last_vision_model.pth")
             torch.save(model.state_dict(), last_path)
-        
+
+        # Final Test-Set Evaluation
+        test_acc = None
+        test_report = None
+        if len(test_ds) == 0:
+            logging.warning("Test set is empty - skipping test evaluation")
+        else:
+            logging.info("Evaluating best checkpoint on held-out Test set...")
+            best_path = os.path.join(args.output_dir, "best_vision_model.pth")
+            model.load_state_dict(torch.load(best_path, map_location=device))
+            model.eval()
+
+            test_correct = 0
+            test_total = 0
+            all_preds, all_labels = [], []
+            with torch.no_grad():
+                for imgs, labels in tqdm(test_loader, desc="Testing"):
+                    imgs, labels = imgs.to(device), labels.to(device)
+                    outputs = model(imgs)
+                    _, preds = outputs.max(1)
+                    test_total += labels.size(0)
+                    test_correct += preds.eq(labels).sum().item()
+                    all_preds.extend(preds.cpu().tolist())
+                    all_labels.extend(labels.cpu().tolist())
+
+            test_acc = 100 * test_correct / test_total
+            test_report = classification_report(all_labels, all_preds, target_names=['Real', 'Fake'], output_dict=True)
+            logging.info(f"Test Accuracy: {test_acc:.2f}%")
+            logging.info("Test Classification Report:\n" +
+                         classification_report(all_labels, all_preds, target_names=['Real', 'Fake']))
+
         # Final Metrics
         metrics = {
             "best_val_acc": best_acc,
             "final_train_acc": final_train_acc,
-            "final_train_loss": final_train_loss
+            "final_train_loss": final_train_loss,
+            "test_acc": test_acc,
+            "test_classification_report": test_report
         }
         with open(os.path.join(args.output_dir, "metrics.json"), "w") as f:
             json.dump(metrics, f, indent=4)
-            
+
         logging.info("Training complete.")
         sys.stdout.flush()
     except KeyboardInterrupt:
@@ -287,8 +325,6 @@ def main():
         sys.exit(1)
     except Exception as e:
         logging.error(f"❌ Training failed: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
         sys.stdout.flush()
         sys.exit(1)
 

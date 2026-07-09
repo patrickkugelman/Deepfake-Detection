@@ -18,8 +18,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN mkdir -p /app/agents/coordinator
 
 # Copy source files into the package structure
-COPY api.py celery_tasks.py mcp_protocol.py s3_manager.py agentic_router.py /app/agents/coordinator/
-COPY email_notifier.py email_service.py gemini_vision_analyzer.py gpt4_vision_analyzer.py neurosymbolic.py vertex_ai_helper.py /app/agents/coordinator/
+# (wildcard, not an explicit list — a previous explicit list silently fell out of
+# sync as new modules were added: rate_limiter.py, usage_tracking.py, and
+# security_headers.py were all missing and only worked locally because the dev
+# volume mount papers over a missing COPY; a from-scratch build without that
+# mount would crash at import time)
+COPY *.py /app/agents/coordinator/
 COPY tools /app/agents/coordinator/tools/
 
 # Create __init__.py files to make it a proper package

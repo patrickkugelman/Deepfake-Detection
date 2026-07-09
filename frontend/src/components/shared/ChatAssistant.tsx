@@ -11,7 +11,7 @@ import {
   Brain, Activity
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { chatWithBot, getJobStatus, sendChatMessage, AnalysisResponse } from "@/lib/api";
+import { chatWithBot, getJobStatus, sendChatMessage, getChatHistory, AnalysisResponse } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { toast } from "sonner";
 
@@ -169,6 +169,30 @@ export function ChatAssistant() {
     }
   }, [isOpen]);
 
+  // Load persisted conversation for this job (survives page reloads) — without this,
+  // every reload started a fresh chat with no memory of what was already discussed.
+  useEffect(() => {
+    if (!isOnResults || !cleanJobId || !token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { messages: stored } = await getChatHistory(cleanJobId, token);
+        if (!cancelled && stored && stored.length > 0) {
+          setMessages(stored.map((m) => ({
+            id: makeId(),
+            role: m.role as Message['role'],
+            content: m.content,
+            timestamp: m.ts ? new Date(m.ts) : new Date(),
+          })));
+          setShowSuggestions(false);
+        }
+      } catch {
+        // best-effort — keep the default greeting if history can't be loaded
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [isOnResults, cleanJobId, token]);
+
   const addTypingIndicator = () => {
     const id = makeId();
     setMessages(prev => [...prev, { id, role: 'assistant', content: '', isTyping: true, timestamp: new Date() }]);
@@ -227,8 +251,12 @@ export function ChatAssistant() {
 
     try {
       if (isOnResults && cleanJobId && !attachment) {
-        // Q&A about existing analysis
-        const response = await sendChatMessage(cleanJobId, userMsg, token);
+        // Q&A about existing analysis — `messages` here is still the pre-send state
+        // (setMessages above hasn't flushed yet), so this is exactly the prior turns.
+        const historyForApi = messages
+          .filter(m => !m.isTyping && (m.role === 'user' || m.role === 'assistant'))
+          .map(m => ({ role: m.role, content: m.content }));
+        const response = await sendChatMessage(cleanJobId, userMsg, token, historyForApi);
         removeTypingIndicator(typingId);
         setIsLoading(false);
 

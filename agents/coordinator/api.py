@@ -12,6 +12,18 @@ import base64
 from typing import List, Optional, Dict, Any, Set, cast
 from datetime import datetime, timedelta
 
+# SaaS modules
+from api_keys import (
+    create_api_key, list_api_keys, revoke_api_key, validate_api_key,
+    check_quota, increment_usage, ensure_user_plan_field, PLAN_QUOTAS, PLAN_PRICES
+)
+from rate_limiter import check_rate_limit as rl_check, build_rate_limit_headers
+from usage_tracking import (
+    record_daily_usage, get_daily_chart, get_current_month_breakdown,
+    get_per_key_usage,
+)
+from security_headers import SecurityHeadersMiddleware
+
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -45,7 +57,8 @@ from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+# auto_error=False so we can handle API keys without FastAPI raising 401 first
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=False)
 
 # --- 5. IMPORTURI DINAMICE ---
 try:
@@ -132,14 +145,29 @@ app = FastAPI(
     version="2.0.0"
 )
 
-ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:8501").split(",")
+ALLOWED_ORIGINS = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:8501,https://deepguard.io,https://app.deepguard.io"
+).split(",")
+
+# Regex origin matcher — covers browser extensions (chrome-extension://, moz-extension://)
+ALLOWED_ORIGIN_REGEX = os.getenv(
+    "CORS_ORIGIN_REGEX",
+    r"^(chrome|moz)-extension://.*$"
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-    allow_credentials=True
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"],
+    allow_credentials=True,
 )
+
+# Security headers (Module 7)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Instrumentare automată FastAPI cu OTEL (traces per request)
 if _otel_enabled:
@@ -521,14 +549,32 @@ async def process_pipeline_legacy(job_id: str, username: str, f_hash: str, filen
         await broadcast_status(f"❌ Eroare: {str(e)}", "error", job_id)
 
 # ============================================================================
-# AUTHENTICATION
+# AUTHENTICATION — dual: JWT (frontend) + API key (3rd party integrations)
 # ============================================================================
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> Dict[str, Any]:
+async def get_current_user(request: Request, token: Optional[str] = Depends(oauth2_scheme)) -> Dict[str, Any]:
+    # 1. Try API key from Authorization: Bearer sk_live_...
+    auth_header = request.headers.get("Authorization", "")
+    raw_key = None
+    if auth_header.startswith("Bearer sk_live_"):
+        raw_key = auth_header.removeprefix("Bearer ")
+    # Also accept X-API-Key header
+    if not raw_key:
+        raw_key = request.headers.get("X-API-Key", "")
+    if raw_key and raw_key.startswith("sk_live_"):
+        user = validate_api_key(neo4j_conn, raw_key)
+        if user:
+            ensure_user_plan_field(neo4j_conn, str(user.get("username", "")))
+            return user
+        raise HTTPException(status_code=401, detail="Invalid or revoked API key")
+
+    # 2. Fall back to JWT
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         results = neo4j_conn.query("MATCH (u:User {username: $u}) RETURN u", {"u": payload.get("sub")})
         if results and len(results) > 0:
-            return cast(Dict[str, Any], results[0]['u'])
+            user = cast(Dict[str, Any], results[0]['u'])
+            ensure_user_plan_field(neo4j_conn, str(user.get("username", "")))
+            return user
     except:
         pass
     raise HTTPException(status_code=401, detail="Invalid authentication credentials")
@@ -638,8 +684,498 @@ async def read_users_me(current_user: Dict = Depends(get_current_user)):
         "username": current_user.get("username"),
         "email": current_user.get("email"),
         "disabled": False,
-        "role": current_user.get("role", "user")
+        "role": current_user.get("role", "user"),
+        "plan": current_user.get("plan", "free"),
     }
+
+# ============================================================================
+# API KEY MANAGEMENT
+# ============================================================================
+
+class APIKeyCreate(BaseModel):
+    name: str
+
+class APIKeyRevoke(BaseModel):
+    prefix: str
+
+@app.post("/api/keys")
+async def create_key(body: APIKeyCreate, current_user: Dict = Depends(get_current_user)):
+    """Generate a new API key. The raw key is shown only once."""
+    username = str(current_user.get("username", ""))
+    existing = list_api_keys(neo4j_conn, username)
+    if len(existing) >= 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 API keys per account")
+    return create_api_key(neo4j_conn, username, body.name)
+
+@app.get("/api/keys")
+async def get_keys(current_user: Dict = Depends(get_current_user)):
+    """List all API keys for the current user (prefix only)."""
+    username = str(current_user.get("username", ""))
+    return {"keys": list_api_keys(neo4j_conn, username)}
+
+@app.delete("/api/keys")
+async def delete_key(body: APIKeyRevoke, current_user: Dict = Depends(get_current_user)):
+    """Revoke an API key by prefix."""
+    username = str(current_user.get("username", ""))
+    ok = revoke_api_key(neo4j_conn, username, body.prefix)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"message": "Key revoked successfully"}
+
+# ============================================================================
+# USAGE & PLAN
+# ============================================================================
+
+@app.get("/api/usage")
+async def get_usage(current_user: Dict = Depends(get_current_user)):
+    """Return current month usage and quota."""
+    username = str(current_user.get("username", ""))
+    quota = check_quota(neo4j_conn, username)
+    return {
+        "username": username,
+        "plan": quota["plan"],
+        "used": quota["used"],
+        "limit": quota["limit"],
+        "remaining": quota.get("remaining", -1),
+        "reset": "First day of next month",
+        "plans": {k: {"limit": v, "price_usd": PLAN_PRICES.get(k, 0)} for k, v in PLAN_QUOTAS.items()},
+    }
+
+
+@app.get("/api/keys/{prefix}/usage")
+async def get_key_usage(prefix: str, current_user: Dict = Depends(get_current_user)):
+    """
+    Per-key usage: returns requests this month for one specific API key,
+    plus its 30-day daily chart.
+    """
+    username = str(current_user.get("username", ""))
+
+    # Confirm the key belongs to this user
+    owns = neo4j_conn.query("""
+        MATCH (u:User {username: $u})-[:HAS_KEY]->(k:APIKey {prefix: $prefix})
+        RETURN k.prefix as prefix, k.name as name, k.is_active as is_active,
+               k.created_at as created_at, k.last_used as last_used
+    """, {"u": username, "prefix": prefix})
+    if not owns:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    key_info = dict(owns[0])
+
+    # Aggregate per-key requests this month from DailyUsage
+    month_prefix = datetime.now().strftime("%Y-%m")
+    monthly = neo4j_conn.query("""
+        MATCH (d:DailyUsage {username: $u, api_key_prefix: $prefix})
+        WHERE d.date STARTS WITH $month
+        RETURN sum(d.request_count) as requests_this_month
+    """, {"u": username, "prefix": prefix, "month": month_prefix})
+    requests_this_month = int((monthly[0].get("requests_this_month") if monthly else 0) or 0)
+
+    # 30-day chart for this key
+    chart = neo4j_conn.query("""
+        MATCH (d:DailyUsage {username: $u, api_key_prefix: $prefix})
+        WHERE d.date >= $since
+        RETURN d.date as date, d.request_count as requests
+        ORDER BY d.date ASC
+    """, {
+        "u": username,
+        "prefix": prefix,
+        "since": (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"),
+    })
+
+    quota = check_quota(neo4j_conn, username)
+    return {
+        "key_prefix": key_info["prefix"],
+        "name": key_info.get("name"),
+        "is_active": key_info.get("is_active"),
+        "created_at": str(key_info.get("created_at")) if key_info.get("created_at") else None,
+        "last_used": str(key_info.get("last_used")) if key_info.get("last_used") else None,
+        "plan": quota["plan"],
+        "monthly_limit": quota["limit"],
+        "requests_this_month": requests_this_month,
+        "daily_chart": [
+            {"date": r["date"], "requests": int(r.get("requests") or 0)}
+            for r in (chart or [])
+        ],
+    }
+
+
+# ============================================================================
+# OUTBOUND WEBHOOKS (Module 5)
+# ============================================================================
+class WebhookCreate(BaseModel):
+    url: str
+    events: List[str]
+
+
+@app.post("/webhooks/create")
+async def webhook_create(body: WebhookCreate, current_user: Dict = Depends(get_current_user)):
+    """Register a new outbound webhook. The signing secret is shown only once."""
+    from webhooks import create_webhook, SUPPORTED_EVENTS
+    username = str(current_user.get("username", ""))
+    if not body.url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+    try:
+        return create_webhook(neo4j_conn, username, body.url, body.events)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/webhooks/list")
+async def webhook_list(current_user: Dict = Depends(get_current_user)):
+    """List all webhooks for the current user (no secrets)."""
+    from webhooks import list_webhooks
+    username = str(current_user.get("username", ""))
+    return {"webhooks": list_webhooks(neo4j_conn, username)}
+
+
+@app.delete("/webhooks/{webhook_id}")
+async def webhook_delete(webhook_id: str, current_user: Dict = Depends(get_current_user)):
+    """Delete a webhook permanently."""
+    from webhooks import delete_webhook
+    username = str(current_user.get("username", ""))
+    ok = delete_webhook(neo4j_conn, username, webhook_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"message": "Webhook deleted"}
+
+
+@app.post("/webhooks/{webhook_id}/test")
+async def webhook_test(webhook_id: str, current_user: Dict = Depends(get_current_user)):
+    """Send a test payload to the webhook endpoint (queued via Celery)."""
+    from webhooks import get_webhook, build_test_payload
+    username = str(current_user.get("username", ""))
+    hook = get_webhook(neo4j_conn, webhook_id)
+    if not hook or hook.get("username") != username:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    try:
+        from celery_tasks import deliver_webhook
+        payload = build_test_payload(webhook_id)
+        deliver_webhook.delay(webhook_id, payload)
+        return {"message": "Test delivery queued", "payload": payload}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to queue test: {e}")
+
+
+@app.get("/usage/dashboard")
+async def usage_dashboard(current_user: Dict = Depends(get_current_user)):
+    """
+    Aggregated usage dashboard:
+      - Current month totals + verdict breakdown + file-type breakdown
+      - Per-API-key breakdown
+      - 30-day daily chart
+    Used by the Developer Portal frontend.
+    """
+    username = str(current_user.get("username", ""))
+    quota = check_quota(neo4j_conn, username)
+    breakdown = get_current_month_breakdown(neo4j_conn, username)
+    per_key = get_per_key_usage(neo4j_conn, username)
+    chart = get_daily_chart(neo4j_conn, username, days=30)
+
+    # Compute next reset date (first day of next month, 00:00 UTC)
+    now = datetime.now()
+    if now.month == 12:
+        reset_date = datetime(now.year + 1, 1, 1)
+    else:
+        reset_date = datetime(now.year, now.month + 1, 1)
+
+    return {
+        "current_month": {
+            "total_requests": breakdown["total_requests"],
+            "limit": quota["limit"],
+            "remaining": quota.get("remaining", -1),
+            "plan": quota["plan"],
+            "reset_date": reset_date.strftime("%Y-%m-%dT00:00:00Z"),
+            "verdicts": breakdown["verdicts"],
+            "by_file_type": breakdown["by_file_type"],
+        },
+        "api_keys": per_key,
+        "daily_chart": chart,
+    }
+
+# ============================================================================
+# ANALYZE BY URL (for Chrome extension & API clients)
+# ============================================================================
+
+class AnalyzeURLRequest(BaseModel):
+    url: str
+    query: Optional[str] = None
+    force_refresh: Optional[bool] = False
+
+@app.post("/analyze_url")
+async def analyze_url(
+    body: AnalyzeURLRequest,
+    background_tasks: BackgroundTasks,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Analyze media from a URL (image or video).
+    Used by Chrome extension and API clients that can't do multipart uploads easily.
+    """
+    import mimetypes
+    from urllib.parse import urlparse
+
+    username = str(current_user.get("username", "anonymous"))
+
+    # Quota check
+    quota = check_quota(neo4j_conn, username)
+    if not quota["allowed"]:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "quota_exceeded",
+                "message": f"Monthly limit reached ({quota['used']}/{quota['limit']}). Upgrade your plan.",
+                "plan": quota["plan"],
+            }
+        )
+
+    # Validate URL
+    parsed = urlparse(body.url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs are supported")
+
+    # Download the media
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(body.url, headers={"User-Agent": "DeepGuard/2.0"})
+            response.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=400, detail=f"Could not fetch URL: HTTP {e.response.status_code}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not fetch URL: {str(e)}")
+
+    content = response.content
+    if len(content) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large (max 100MB)")
+
+    # Detect MIME type
+    content_type = response.headers.get("content-type", "").split(";")[0].strip()
+    if not content_type or content_type == "application/octet-stream":
+        filename = os.path.basename(parsed.path) or "media"
+        content_type, _ = mimetypes.guess_type(filename)
+        content_type = content_type or "application/octet-stream"
+
+    allowed = ALLOWED_VIDEO_TYPES + ALLOWED_IMAGE_TYPES
+    if content_type not in allowed:
+        raise HTTPException(status_code=400, detail=f"Unsupported media type: {content_type}")
+
+    filename = os.path.basename(parsed.path) or f"url_media{mimetypes.guess_extension(content_type) or ''}"
+    f_hash = hashlib.sha256(content).hexdigest()
+    file_type = os.path.splitext(filename)[1] or mimetypes.guess_extension(content_type) or ".bin"
+    job_id = str(uuid.uuid4())
+
+    # Cache check
+    cached = neo4j_conn.query("""
+        MATCH (f:File {hash: $hash})
+        WHERE f.verdict IS NOT NULL
+        RETURN f.verdict as verdict, f.confidence as confidence, f.reasoning as reasoning
+    """, {"hash": f_hash})
+
+    if cached and not body.force_refresh:
+        cached_job_id = str(uuid.uuid4())
+        neo4j_conn.query("""
+            MATCH (u:User {username: $username})
+            CREATE (j:Job {
+                id: $job_id, status: 'completed', progress: 100,
+                filename: $filename, created_at: datetime(), completed_at: datetime(),
+                result: $result, source_url: $url
+            })
+            CREATE (u)-[:REQUESTED]->(j)
+        """, {
+            "username": username,
+            "job_id": cached_job_id,
+            "filename": filename,
+            "result": json.dumps({"verdict": cached[0]["verdict"], "confidence": cached[0]["confidence"], "cached": True}),
+            "url": body.url,
+        })
+        increment_usage(neo4j_conn, username)
+        return {
+            "job_id": cached_job_id,
+            "status": "completed",
+            "cached": True,
+            "verdict": cached[0]["verdict"],
+            "confidence": cached[0]["confidence"],
+            "reasoning": cached[0]["reasoning"],
+        }
+
+    # Create job and dispatch
+    neo4j_conn.query("""
+        MATCH (u:User {username: $username})
+        CREATE (j:Job {
+            id: $job_id, status: 'queued', progress: 0,
+            filename: $filename, mime_type: $mime_type,
+            file_size: $file_size, created_at: datetime(),
+            source_url: $url
+        })
+        CREATE (u)-[:REQUESTED]->(j)
+    """, {
+        "username": username,
+        "job_id": job_id,
+        "filename": filename,
+        "mime_type": content_type,
+        "file_size": len(content),
+        "url": body.url,
+    })
+
+    if CELERY_ENABLED:
+        task = process_media_analysis.delay(job_id, username, f_hash, filename, content, file_type, body.query)
+        neo4j_conn.query(
+            "MATCH (j:Job {id: $job_id}) SET j.celery_task_id = $task_id",
+            {"job_id": job_id, "task_id": task.id}
+        )
+    else:
+        background_tasks.add_task(
+            process_pipeline_legacy, job_id, username, f_hash, filename, content, file_type, body.query
+        )
+
+    increment_usage(neo4j_conn, username)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Analysis started.",
+        "quota": {"used": quota["used"] + 1, "limit": quota["limit"], "plan": quota["plan"]},
+    }
+
+# ============================================================================
+# SLACK BOT
+# ============================================================================
+try:
+    from slack_bot import (
+        verify_slack_signature, format_queued_blocks,
+        post_result_to_slack, post_error_to_slack, SLACK_SIGNING_SECRET
+    )
+    SLACK_ENABLED = bool(SLACK_SIGNING_SECRET)
+except ImportError:
+    SLACK_ENABLED = False
+    logger.warning("⚠️ slack_bot module not available")
+
+_SLACK_BOT_USER = os.getenv("SLACK_BOT_API_USER", "slack_bot")
+
+@app.post("/slack/events")
+async def slack_events(request: Request, background_tasks: BackgroundTasks):
+    """
+    Receives Slack events: slash commands (/deepguard URL) and app_mention.
+    Must respond within 3 seconds — fires async job and ACKs immediately.
+    """
+    body_bytes = await request.body()
+
+    # Signature verification
+    timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
+    signature = request.headers.get("X-Slack-Signature", "")
+    if SLACK_ENABLED and not verify_slack_signature(body_bytes, timestamp, signature):
+        raise HTTPException(status_code=401, detail="Invalid Slack signature")
+
+    content_type = request.headers.get("content-type", "")
+
+    # Parse payload (slash commands send form data, events send JSON)
+    if "application/json" in content_type:
+        try:
+            data = json.loads(body_bytes.decode() or "{}")
+        except Exception:
+            data = {}
+        # URL verification challenge (Slack sends this when registering the endpoint)
+        if data.get("type") == "url_verification":
+            return {"challenge": data.get("challenge")}
+        event = data.get("event", {})
+        text = event.get("text", "").strip()
+        response_url = None
+        channel = event.get("channel")
+    else:
+        from urllib.parse import parse_qs
+        parsed = parse_qs(body_bytes.decode())
+        text = parsed.get("text", [""])[0].strip()
+        response_url = parsed.get("response_url", [None])[0]
+        channel = parsed.get("channel_id", [None])[0]
+
+    # Extract URL from the command text
+    import re
+    url_match = re.search(r'https?://\S+', text)
+    if not url_match:
+        if response_url:
+            await post_error_to_slack(
+                response_url,
+                "Please provide a URL to analyze. Usage: `/deepguard https://example.com/image.jpg`"
+            )
+        return {"text": "Please provide a URL. Usage: `/deepguard https://example.com/image.jpg`"}
+
+    media_url = url_match.group(0)
+
+    # Ensure bot user exists in Neo4j
+    existing = neo4j_conn.query("MATCH (u:User {username: $u}) RETURN u", {"u": _SLACK_BOT_USER})
+    if not existing:
+        neo4j_conn.query("""
+            MERGE (u:User {username: $u})
+            ON CREATE SET u.role = 'user', u.plan = 'business',
+                          u.email = 'slack@deepguard.pro', u.created_at = datetime()
+        """, {"u": _SLACK_BOT_USER})
+
+    # Create job
+    import mimetypes as _mt
+    from urllib.parse import urlparse as _up
+    job_id = str(uuid.uuid4())
+
+    # ACK immediately to Slack
+    ack_blocks = format_queued_blocks(job_id, media_url) if SLACK_ENABLED else []
+
+    async def run_slack_analysis():
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(media_url, headers={"User-Agent": "DeepGuard/2.0"})
+                resp.raise_for_status()
+            content = resp.content
+            ct = resp.headers.get("content-type", "").split(";")[0].strip()
+            filename = os.path.basename(_up(media_url).path) or "slack_media"
+            if not ct or ct == "application/octet-stream":
+                ct, _ = _mt.guess_type(filename)
+                ct = ct or "image/jpeg"
+            f_hash = hashlib.sha256(content).hexdigest()
+            ext = os.path.splitext(filename)[1] or (_mt.guess_extension(ct) or ".bin")
+
+            neo4j_conn.query("""
+                MATCH (u:User {username: $u})
+                CREATE (j:Job {id: $id, status: 'queued', progress: 0,
+                               filename: $fn, mime_type: $ct, file_size: $fs,
+                               created_at: datetime(), source_url: $url})
+                CREATE (u)-[:REQUESTED]->(j)
+            """, {"u": _SLACK_BOT_USER, "id": job_id, "fn": filename,
+                  "ct": ct, "fs": len(content), "url": media_url})
+
+            if CELERY_ENABLED:
+                task = process_media_analysis.delay(job_id, _SLACK_BOT_USER, f_hash, filename, content, ext, None)
+                neo4j_conn.query("MATCH (j:Job {id: $id}) SET j.celery_task_id = $tid",
+                                 {"id": job_id, "tid": task.id})
+
+            # Poll for result (max 90 seconds)
+            for _ in range(30):
+                await asyncio.sleep(3)
+                rows = neo4j_conn.query("""
+                    MATCH (j:Job {id: $id}) RETURN j.status as status, j.result as result,
+                    j.filename as filename
+                """, {"id": job_id})
+                if rows and rows[0].get("status") == "completed":
+                    result_raw = rows[0].get("result") or "{}"
+                    result = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
+                    result["filename"] = rows[0].get("filename", filename)
+                    if response_url:
+                        await post_result_to_slack(response_url, result)
+                    return
+                if rows and rows[0].get("status") == "failed":
+                    if response_url:
+                        await post_error_to_slack(response_url, "Analysis failed. Please try again.")
+                    return
+
+            if response_url:
+                await post_error_to_slack(response_url, f"Analysis timed out. Check job `{job_id}` later.")
+
+        except Exception as e:
+            logger.error(f"Slack analysis error: {e}")
+            if response_url:
+                await post_error_to_slack(response_url, f"Error: {str(e)[:200]}")
+
+    background_tasks.add_task(run_slack_analysis)
+
+    if ack_blocks:
+        return {"response_type": "in_channel", "blocks": ack_blocks}
+    return {"text": f"🔍 Analyzing `{media_url}`... I'll post the result shortly."}
 
 # ============================================================================
 # MAIN ANALYSIS ENDPOINT
@@ -647,6 +1183,7 @@ async def read_users_me(current_user: Dict = Depends(get_current_user)):
 @app.post("/chat_analyze")
 async def chat_analyze(
     background_tasks: BackgroundTasks,
+    request: Request,
     file: Optional[UploadFile] = File(None),
     query: Optional[str] = Form(None),
     force_refresh: Optional[str] = Form(None),
@@ -657,7 +1194,57 @@ async def chat_analyze(
 
     job_id = str(uuid.uuid4())
     username = str(current_user.get('username', 'anonymous'))
-    
+    auth_method = str(current_user.get("auth_method", "jwt"))
+
+    # ------------------------------------------------------------------
+    # Redis-backed sliding-window rate limit (per IP)
+    # ------------------------------------------------------------------
+    client_ip = request.client.host if request.client else "unknown"
+    bucket = "chat_analyze_auth" if username != "anonymous" else "chat_analyze_unauth"
+    rl_allowed, rl_info = rl_check(identifier=client_ip, bucket=bucket)
+    if not rl_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limit_exceeded",
+                "message": f"Too many requests. Retry after {rl_info['retry_after']}s.",
+                "code": 429,
+                "details": {
+                    "limit": rl_info["limit"],
+                    "window_seconds": rl_info["window"],
+                    "reset_at": rl_info["reset_at"],
+                },
+            },
+            headers=build_rate_limit_headers(rl_info),
+        )
+
+    # ------------------------------------------------------------------
+    # Monthly quota check (per user, from api_keys.check_quota)
+    # ------------------------------------------------------------------
+    quota = check_quota(neo4j_conn, username)
+    if not quota["allowed"]:
+        reset_date = f"{datetime.now().year}-{datetime.now().month + 1 if datetime.now().month < 12 else 1:02d}-01T00:00:00Z"
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "quota_exceeded",
+                "message": f"Monthly limit reached ({quota['used']}/{quota['limit']}). Upgrade your plan.",
+                "code": 429,
+                "details": {
+                    "plan": quota["plan"],
+                    "used": quota["used"],
+                    "limit": quota["limit"],
+                    "reset_date": reset_date,
+                },
+            },
+            headers={
+                "X-RateLimit-Limit": str(quota["limit"]),
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": reset_date,
+                "Retry-After": "86400",
+            }
+        )
+
     # 1. Handle File Upload
     if file:
         # Validate MIME type (if available) behavior checks
@@ -828,10 +1415,18 @@ async def chat_analyze(
             job_id, username, f_hash, safe_filename, content, file_type, query
         )
     
+    # Track usage
+    increment_usage(neo4j_conn, username)
+
     return {
-        "job_id": job_id, 
+        "job_id": job_id,
         "status": "queued",
-        "message": "Analiza a fost trimisă spre procesare."
+        "message": "Analiza a fost trimisă spre procesare.",
+        "quota": {
+            "used": quota["used"] + 1,
+            "limit": quota["limit"],
+            "plan": quota["plan"],
+        }
     }
 
 # ============================================================================
@@ -929,6 +1524,7 @@ async def get_job_status(job_id: str, current_user: Dict = Depends(get_current_u
         "completed_at": data.get("completed_at"),
         "result": data.get("result"),
         "celery_state": data.get("celery_state"),
+        "error": data.get("error"),
         "osint_results": osint_results,
         "osint_risk_level": data.get("osint_risk_level"),
         "osint_completed_at": data.get("osint_completed_at")
@@ -1014,6 +1610,28 @@ class ChatRequest(BaseModel):
     job_id: Optional[str] = None
     message: str
     context: Optional[str] = None
+    history: Optional[List[Dict[str, str]]] = None  # prior turns: [{"role": "user"|"assistant", "content": "..."}]
+
+
+def _persist_chat_turn(job_id: str, user_message: str, assistant_reply: str) -> None:
+    """Append a user+assistant turn to the job's stored chat history (best-effort, capped)."""
+    rows = neo4j_conn.query(
+        "MATCH (j:Job {id: $job_id}) RETURN j.chat_history as history",
+        {"job_id": job_id}
+    )
+    existing: List[Dict[str, str]] = []
+    if rows and rows[0].get("history"):
+        try:
+            existing = json.loads(rows[0]["history"])
+        except Exception:
+            existing = []
+    existing.append({"role": "user", "content": user_message, "ts": datetime.utcnow().isoformat()})
+    existing.append({"role": "assistant", "content": assistant_reply, "ts": datetime.utcnow().isoformat()})
+    existing = existing[-40:]  # cap stored history so the property doesn't grow unbounded
+    neo4j_conn.query(
+        "MATCH (j:Job {id: $job_id}) SET j.chat_history = $history",
+        {"job_id": job_id, "history": json.dumps(existing)}
+    )
 
 @app.post("/chat/message")
 async def chat_message(req: ChatRequest, request: Request, current_user: Dict = Depends(get_current_user)):
@@ -1126,6 +1744,16 @@ async def chat_message(req: ChatRequest, request: Request, current_user: Dict = 
         if openai_client is None:
             raise RuntimeError("OpenAI client not available — check OPENAI_API_KEY")
 
+        # Prior conversation turns — without this, every message was answered in total
+        # isolation (no memory of what was asked/answered before in this chat).
+        # Capped to the last 10 turns to keep token usage bounded.
+        history_messages: List[Dict[str, str]] = []
+        for turn in (req.history or [])[-10:]:
+            role = turn.get("role")
+            content = turn.get("content", "")
+            if role in ("user", "assistant") and content:
+                history_messages.append({"role": role, "content": content})
+
         gpt_response = openai_client.chat.completions.create(
             model=GPT4_VISION_MODEL,
             messages=[
@@ -1138,12 +1766,21 @@ async def chat_message(req: ChatRequest, request: Request, current_user: Dict = 
                         "Never invent evidence — only cite what is provided in the context."
                     )
                 },
+                *history_messages,
                 {"role": "user", "content": system_prompt}
             ],
             max_tokens=1024,
             temperature=0.3,
         )
         reply = gpt_response.choices[0].message.content or "Răspuns gol de la GPT-4o."
+
+        # Persist this turn so /chat/history can return it after a reload — best-effort,
+        # a storage hiccup here shouldn't fail the chat response itself.
+        if req.job_id:
+            try:
+                _persist_chat_turn(req.job_id, req.message, reply)
+            except Exception as e:
+                logger.warning(f"Failed to persist chat turn for job {req.job_id}: {e}")
 
         return {
             "role": "assistant",
@@ -1161,9 +1798,25 @@ async def chat_message(req: ChatRequest, request: Request, current_user: Dict = 
         }
 
 @app.get("/chat/history")
-async def get_chat_history(current_user: Dict = Depends(get_current_user)):
-    # Placeholder: In a real app, fetch from Neo4j
-    return {"messages": []}
+async def get_chat_history(job_id: str, current_user: Dict = Depends(get_current_user)):
+    """Return the stored chat turns for a job, scoped to its owner."""
+    username = current_user.get("username", "")
+    rows = neo4j_conn.query("""
+        MATCH (j:Job {id: $job_id})<-[:REQUESTED]-(u:User {username: $username})
+        RETURN j.chat_history as history
+    """, {"job_id": job_id, "username": username})
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    raw = rows[0].get("history")
+    messages = []
+    if raw:
+        try:
+            messages = json.loads(raw)
+        except Exception:
+            messages = []
+    return {"messages": messages}
 
 # ============================================================================
 # SYSTEM CONFIG
@@ -1611,6 +2264,81 @@ async def generate_report(req: ReportRequest, current_user: Dict = Depends(get_c
             "Content-Disposition": f'attachment; filename="DeepGuard_Report_{req.filename}.pdf"'
         }
     )
+
+
+# ============================================================================
+# FORENSIC REPORT (Module 9) — court-grade 5-page PDF + public verification
+# ============================================================================
+class ForensicReportRequest(BaseModel):
+    job_id: str
+
+
+@app.post("/generate-forensic-report")
+async def generate_forensic_report_endpoint(
+    body: ForensicReportRequest,
+    current_user: Dict = Depends(get_current_user),
+):
+    """
+    Generate a court-grade 5-page forensic PDF report with sequential numbering,
+    SHA-256 signature, and public verify link. Requires Pro+ plan.
+    """
+    from fastapi.responses import StreamingResponse
+    import io as _io
+
+    username = str(current_user.get("username", ""))
+    plan = str(current_user.get("plan", "free")).lower()
+    if plan not in ("pro", "business", "enterprise"):
+        raise HTTPException(
+            status_code=403,
+            detail="Forensic reports require Pro plan or higher. Upgrade at /billing."
+        )
+
+    try:
+        from forensic_report import create_forensic_report
+        result = create_forensic_report(neo4j_conn, body.job_id, username)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ImportError as e:
+        raise HTTPException(status_code=500, detail=f"forensic_report module unavailable: {e}")
+    except Exception as e:
+        logger.error(f"Forensic report generation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
+
+    pdf_stream = _io.BytesIO(result["pdf"])
+    safe_name = (result.get("filename") or "report").replace(" ", "_")
+    return StreamingResponse(
+        pdf_stream,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{result["report_number"]}_{safe_name}.pdf"',
+            "X-DeepGuard-Report-Number": result["report_number"],
+            "X-DeepGuard-Report-Hash": result["report_hash"],
+        },
+    )
+
+
+@app.get("/verify/{report_hash}")
+async def verify_forensic_report(report_hash: str):
+    """
+    PUBLIC endpoint — no auth required.
+    Validates a forensic report by its SHA-256 signature.
+    """
+    try:
+        from forensic_report import verify_report_hash
+    except ImportError:
+        raise HTTPException(status_code=500, detail="verification module unavailable")
+
+    if not report_hash or len(report_hash) != 64:
+        raise HTTPException(status_code=400, detail="Invalid report hash format (expected 64-char SHA-256 hex)")
+
+    result = verify_report_hash(neo4j_conn, report_hash)
+    if not result:
+        return {
+            "valid": False,
+            "report_hash": report_hash,
+            "message": "No forensic report found with this signature. The report may have been tampered with or was never issued by DeepGuard Pro.",
+        }
+    return result
 
 
 # ============================================================================

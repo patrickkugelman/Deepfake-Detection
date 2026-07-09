@@ -1,12 +1,6 @@
-"""
-DeepGuard Pro - Fingerprint Analyzer Agent (Port 8006)
-GAN/Diffusion Model Attribution via Spectral Analysis (DCT/FFT)
-Identifică cu ce tool AI a fost creat un deepfake.
-"""
 import os
 import io
 import time
-import uuid
 import logging
 import threading
 import numpy as np
@@ -31,72 +25,146 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Semnături spectrale cunoscute pentru fiecare model generator
-# Bazate pe caracteristici empirice din literatura de specialitate
-# ─────────────────────────────────────────────────────────────────────────────
 MODEL_SIGNATURES = {
-    "StableDiffusion": {
-        "description": "Stable Diffusion (v1.x / v2.x / SDXL)",
-        "fft_high_freq_ratio": (0.04, 0.12),   # Raportul puterii în benzi înalte
-        "dct_energy_concentration": (0.70, 0.88), # Concentrarea energiei în benzi joase DCT
-        "spectral_entropy_range": (3.2, 4.8),
-        "color_channel_correlation": (0.82, 0.97), # Corelație ridicată între canale RGB
-        "artifact_signature": "periodic_noise_pattern",
-        "color_badge": "#f97316"  # portocaliu
+    "BigGAN": {
+        "description": "BigGAN (GAN condiționat pe clasă, stil ImageNet)",
+        "fft_high_freq_ratio": (0.00023, 0.00157),
+        "dct_energy_concentration": (0.99678, 0.99970),
+        "spectral_falloff_slope": (-0.28402, -0.24380),
+        "spectral_entropy_range": (2.119, 3.080),
+        "color_channel_correlation": (0.8154, 0.9878),
+        "color_badge": "#f97316"
     },
-    "Midjourney": {
-        "description": "Midjourney (v4 / v5 / v6)",
-        "fft_high_freq_ratio": (0.02, 0.09),
-        "dct_energy_concentration": (0.75, 0.92),
-        "spectral_entropy_range": (2.8, 4.2),
-        "color_channel_correlation": (0.85, 0.98),
-        "artifact_signature": "smooth_gradient_artifacts",
-        "color_badge": "#8b5cf6"  # violet
+    "CIPS": {
+        "description": "CIPS (Conditionally Independent Pixel Synthesis)",
+        "fft_high_freq_ratio": (0.00056, 0.00403),
+        "dct_energy_concentration": (0.99155, 0.99908),
+        "spectral_falloff_slope": (-0.26169, -0.17515),
+        "spectral_entropy_range": (2.101, 3.201),
+        "color_channel_correlation": (0.8441, 0.9794),
+        "color_badge": "#8b5cf6"
     },
-    "DALL-E": {
-        "description": "DALL-E 2 / DALL-E 3 (OpenAI)",
-        "fft_high_freq_ratio": (0.05, 0.13),
-        "dct_energy_concentration": (0.68, 0.85),
-        "spectral_entropy_range": (3.5, 5.0),
-        "color_channel_correlation": (0.78, 0.94),
-        "artifact_signature": "compositional_inconsistency",
-        "color_badge": "#10b981"  # verde
+    "CycleGAN": {
+        "description": "CycleGAN (traducere imagine-la-imagine nepereche)",
+        "fft_high_freq_ratio": (0.00150, 0.01237),
+        "dct_energy_concentration": (0.97529, 0.99706),
+        "spectral_falloff_slope": (-0.21915, -0.14495),
+        "spectral_entropy_range": (2.577, 3.914),
+        "color_channel_correlation": (0.7749, 0.9811),
+        "color_badge": "#14b8a6"
     },
-    "DeepFaceLab": {
-        "description": "DeepFaceLab (Face-Swap GAN)",
-        "fft_high_freq_ratio": (0.08, 0.18),    # Mai mult noise la margini de față
-        "dct_energy_concentration": (0.60, 0.80),
-        "spectral_entropy_range": (4.0, 5.5),   # Entropie mai mare din cauza blend-ului
-        "color_channel_correlation": (0.70, 0.88),
-        "artifact_signature": "blend_boundary_artifacts",
-        "color_badge": "#ef4444"  # roșu
+    "DDPM": {
+        "description": "DDPM (Denoising Diffusion Probabilistic Model)",
+        "fft_high_freq_ratio": (0.00065, 0.00385),
+        "dct_energy_concentration": (0.99210, 0.99898),
+        "spectral_falloff_slope": (-0.23973, -0.18004),
+        "spectral_entropy_range": (2.237, 2.933),
+        "color_channel_correlation": (0.8101, 0.9806),
+        "color_badge": "#3b82f6"
     },
-    "ProPainter": {
-        "description": "ProPainter / Inpainting Models",
-        "fft_high_freq_ratio": (0.06, 0.15),
-        "dct_energy_concentration": (0.65, 0.83),
-        "spectral_entropy_range": (3.8, 5.2),
-        "color_channel_correlation": (0.75, 0.92),
-        "artifact_signature": "texture_boundary_discontinuity",
-        "color_badge": "#3b82f6"  # albastru
+    "Denoising Diffusion GAN": {
+        "description": "Denoising Diffusion GAN (hibrid difuzie-GAN)",
+        "fft_high_freq_ratio": (0.00094, 0.00287),
+        "dct_energy_concentration": (0.98889, 0.99826),
+        "spectral_falloff_slope": (-0.23657, -0.19389),
+        "spectral_entropy_range": (1.869, 2.527),
+        "color_channel_correlation": (0.9054, 0.9828),
+        "color_badge": "#ec4899"
+    },
+    "Diffusion-StyleGAN2": {
+        "description": "Diffusion-StyleGAN2 (StyleGAN2 regularizat prin difuzie)",
+        "fft_high_freq_ratio": (0.00125, 0.00730),
+        "dct_energy_concentration": (0.98600, 0.99784),
+        "spectral_falloff_slope": (-0.21650, -0.15801),
+        "spectral_entropy_range": (2.174, 3.150),
+        "color_channel_correlation": (0.8518, 0.9796),
+        "color_badge": "#a855f7"
+    },
+    "Face Synthetics (rendered)": {
+        "description": "Microsoft Face Synthetics (fețe randate 3D sintetic)",
+        "fft_high_freq_ratio": (0.00104, 0.00413),
+        "dct_energy_concentration": (0.99542, 0.99874),
+        "spectral_falloff_slope": (-0.22851, -0.18941),
+        "spectral_entropy_range": (1.987, 2.826),
+        "color_channel_correlation": (0.8115, 0.9817),
+        "color_badge": "#f59e0b"
+    },
+    "GANsformer": {
+        "description": "GANsformer (GAN pe bază de transformer)",
+        "fft_high_freq_ratio": (0.00078, 0.00238),
+        "dct_energy_concentration": (0.99422, 0.99882),
+        "spectral_falloff_slope": (-0.23511, -0.19733),
+        "spectral_entropy_range": (2.023, 2.812),
+        "color_channel_correlation": (0.8807, 0.9794),
+        "color_badge": "#06b6d4"
+    },
+    "GauGAN": {
+        "description": "GauGAN (sinteză semantică de imagini, NVIDIA)",
+        "fft_high_freq_ratio": (0.00124, 0.00733),
+        "dct_energy_concentration": (0.98436, 0.99812),
+        "spectral_falloff_slope": (-0.22252, -0.16848),
+        "spectral_entropy_range": (2.359, 3.314),
+        "color_channel_correlation": (0.8564, 0.9823),
+        "color_badge": "#eab308"
+    },
+    "Generative Inpainting": {
+        "description": "Gated Convolution Inpainting",
+        "fft_high_freq_ratio": (0.00186, 0.01415),
+        "dct_energy_concentration": (0.97243, 0.99650),
+        "spectral_falloff_slope": (-0.20079, -0.14434),
+        "spectral_entropy_range": (2.479, 3.501),
+        "color_channel_correlation": (0.7828, 0.9756),
+        "color_badge": "#ef4444"
+    },
+    "GLIDE": {
+        "description": "GLIDE (difuzie ghidată prin text, OpenAI)",
+        "fft_high_freq_ratio": (0.00051, 0.00642),
+        "dct_energy_concentration": (0.98288, 0.99937),
+        "spectral_falloff_slope": (-0.28284, -0.18503),
+        "spectral_entropy_range": (2.227, 3.215),
+        "color_channel_correlation": (0.7327, 0.9830),
+        "color_badge": "#6366f1"
+    },
+    "LaMa (inpainting)": {
+        "description": "LaMa (inpainting cu măști mari)",
+        "fft_high_freq_ratio": (0.00085, 0.00647),
+        "dct_energy_concentration": (0.98629, 0.99851),
+        "spectral_falloff_slope": (-0.24434, -0.17166),
+        "spectral_entropy_range": (1.996, 3.155),
+        "color_channel_correlation": (0.8480, 0.9833),
+        "color_badge": "#d946ef"
+    },
+    "Latent Diffusion": {
+        "description": "Latent Diffusion Model (LDM)",
+        "fft_high_freq_ratio": (0.00077, 0.00813),
+        "dct_energy_concentration": (0.98270, 0.99883),
+        "spectral_falloff_slope": (-0.24364, -0.16146),
+        "spectral_entropy_range": (2.188, 3.202),
+        "color_channel_correlation": (0.7370, 0.9863),
+        "color_badge": "#0ea5e9"
+    },
+    "Natural": {
+        "description": "Caracteristici spectrale consistente cu o fotografie naturală",
+        "fft_high_freq_ratio": (0.00145, 0.01027),
+        "dct_energy_concentration": (0.97522, 0.99713),
+        "spectral_falloff_slope": (-0.20795, -0.14855),
+        "spectral_entropy_range": (2.214, 3.171),
+        "color_channel_correlation": (0.8520, 0.9863),
+        "color_badge": "#22c55e"
     }
 }
 
+_NATURAL_FALLOFF_MID = sum(MODEL_SIGNATURES["Natural"]["spectral_falloff_slope"]) / 2
+_GENERATOR_FALLOFF_MID = sum(
+    sum(sig["spectral_falloff_slope"]) / 2
+    for name, sig in MODEL_SIGNATURES.items() if name != "Natural"
+) / (len(MODEL_SIGNATURES) - 1)
+FALLOFF_DECISION_BOUNDARY = (_NATURAL_FALLOFF_MID + _GENERATOR_FALLOFF_MID) / 2
+FALLOFF_SIGMOID_SCALE = abs(_GENERATOR_FALLOFF_MID - _NATURAL_FALLOFF_MID) / 2
 
 class FingerprintAnalyzer:
-    """
-    Motor de analiză spectrală pentru atribuirea modelului generator.
-    Folosește DCT, FFT 2D și entropie spectrală pentru fingerprinting.
-    """
-
     def extract_dct_features(self, gray: np.ndarray) -> dict:
-        """
-        Extrage caracteristici din domeniul DCT pe blocuri 8x8 (similar JPEG).
-        GANurile lasă amprente specifice în coeficienții DCT de înaltă frecvență.
-        """
         h, w = gray.shape
-        # Resize la multiplu de 8
         h_new = (h // 8) * 8
         w_new = (w // 8) * 8
         gray_resized = cv2.resize(gray, (w_new, h_new))
@@ -114,9 +182,7 @@ class FingerprintAnalyzer:
                 if block_energy < 1e-10:
                     continue
 
-                # DC + primele benzi joase (0:4, 0:4)
                 low_e = np.sum(dct_block[:4, :4] ** 2)
-                # Benzile de înaltă frecvență (4:, 4:)
                 high_e = np.sum(dct_block[4:, 4:] ** 2)
 
                 low_freq_energy.append(low_e / block_energy)
@@ -133,10 +199,6 @@ class FingerprintAnalyzer:
         }
 
     def extract_fft_features(self, gray: np.ndarray) -> dict:
-        """
-        Analizează distribuția puterii în domeniul frecvență (FFT 2D).
-        Modelele generative au distribuții specifice ale puterii spectrale.
-        """
         fft_2d = np.fft.fft2(gray.astype(np.float64))
         fft_shifted = np.fft.fftshift(fft_2d)
         power_spectrum = np.abs(fft_shifted) ** 2
@@ -144,7 +206,6 @@ class FingerprintAnalyzer:
         h, w = power_spectrum.shape
         cy, cx = h // 2, w // 2
 
-        # Împarte în zone concentrice
         y_grid, x_grid = np.ogrid[-cy:h-cy, -cx:w-cx]
         radius_map = np.sqrt(x_grid**2 + y_grid**2)
         max_r = min(cy, cx)
@@ -167,11 +228,32 @@ class FingerprintAnalyzer:
             "fft_high_freq_ratio": float(high_ratio)
         }
 
+    def extract_spectral_falloff(self, gray: np.ndarray, n_bins: int = 40) -> dict:
+        fft = np.fft.fftshift(np.fft.fft2(gray.astype(np.float64)))
+        power = np.log(np.abs(fft) ** 2 + 1e-8)
+
+        h, w = power.shape
+        cy, cx = h // 2, w // 2
+        y, x = np.indices((h, w))
+        r = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        r_max = min(cy, cx)
+
+        r_bin = np.clip((r / max(r_max, 1) * n_bins).astype(int), 0, n_bins - 1)
+        sums = np.bincount(r_bin.ravel(), weights=power.ravel(), minlength=n_bins)
+        counts = np.bincount(r_bin.ravel(), minlength=n_bins)
+        profile = sums / np.maximum(counts, 1)
+
+        lo, hi = 2, n_bins - 2
+        bins_idx = np.arange(lo, hi)
+        values = profile[lo:hi]
+        valid = np.isfinite(values)
+        if valid.sum() < 5:
+            return {"spectral_falloff_slope": -0.15}
+
+        slope = float(np.polyfit(bins_idx[valid], values[valid], 1)[0])
+        return {"spectral_falloff_slope": slope}
+
     def extract_spectral_entropy(self, gray: np.ndarray) -> float:
-        """
-        Calculează entropia spectrală Welch.
-        Conținutul natural are entropie mai mare decât cel generat AI.
-        """
         flat = gray.flatten().astype(np.float64)
         if len(flat) < 256:
             return 4.0
@@ -182,10 +264,6 @@ class FingerprintAnalyzer:
         return ent
 
     def extract_color_correlation(self, image_rgb: np.ndarray) -> float:
-        """
-        Calculează corelația medie dintre canalele RGB.
-        Modelele generative tind să aibă corelații mai mari (culori mai uniforme).
-        """
         if image_rgb.ndim != 3 or image_rgb.shape[2] < 3:
             return 0.85
 
@@ -204,102 +282,78 @@ class FingerprintAnalyzer:
         return float(np.mean([abs(corr_rg), abs(corr_rb), abs(corr_gb)]))
 
     def score_against_signature(self, features: dict, sig: dict) -> float:
-        """
-        Calculează un scor de potrivire [0, 1] între feature-urile extrase
-        și semnătura unui model generator.
-        """
-        scores = []
+        def band_score(value, lo, hi):
+            mid = (lo + hi) / 2
+            spread = (hi - lo) / 2 + 1e-6
+            return max(0.0, 1.0 - abs(value - mid) / spread)
 
-        # 1. FFT high-freq ratio
-        fft_hr = features.get("fft_high_freq_ratio", 0.08)
-        lo, hi = sig["fft_high_freq_ratio"]
-        mid = (lo + hi) / 2
-        spread = (hi - lo) / 2 + 1e-6
-        scores.append(max(0.0, 1.0 - abs(fft_hr - mid) / spread))
-
-        # 2. DCT energy concentration
-        dct_ec = features.get("dct_energy_concentration", 0.75)
-        lo, hi = sig["dct_energy_concentration"]
-        mid = (lo + hi) / 2
-        spread = (hi - lo) / 2 + 1e-6
-        scores.append(max(0.0, 1.0 - abs(dct_ec - mid) / spread))
-
-        # 3. Spectral entropy
-        se = features.get("spectral_entropy", 4.0)
-        lo, hi = sig["spectral_entropy_range"]
-        mid = (lo + hi) / 2
-        spread = (hi - lo) / 2 + 1e-6
-        scores.append(max(0.0, 1.0 - abs(se - mid) / spread))
-
-        # 4. Color channel correlation
-        cc = features.get("color_correlation", 0.87)
-        lo, hi = sig["color_channel_correlation"]
-        mid = (lo + hi) / 2
-        spread = (hi - lo) / 2 + 1e-6
-        scores.append(max(0.0, 1.0 - abs(cc - mid) / spread))
-
-        return float(np.mean(scores))
+        weighted = [
+            (5.0, band_score(features.get("spectral_falloff_slope", -0.15), *sig["spectral_falloff_slope"])),
+            (1.0, band_score(features.get("fft_high_freq_ratio", 0.08), *sig["fft_high_freq_ratio"])),
+            (1.0, band_score(features.get("dct_energy_concentration", 0.75), *sig["dct_energy_concentration"])),
+            (1.0, band_score(features.get("spectral_entropy", 4.0), *sig["spectral_entropy_range"])),
+            (1.0, band_score(features.get("color_correlation", 0.87), *sig["color_channel_correlation"])),
+        ]
+        total_weight = sum(w for w, _ in weighted)
+        return sum(w * s for w, s in weighted) / total_weight
 
     def analyze(self, image_rgb: np.ndarray) -> dict:
-        """
-        Analizează imaginea și returnează modelul generator detectat.
-        """
         gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
 
-        # Extrage toate feature-urile
         dct_feats = self.extract_dct_features(gray)
         fft_feats = self.extract_fft_features(gray)
+        falloff_feats = self.extract_spectral_falloff(gray)
         spectral_ent = self.extract_spectral_entropy(gray)
         color_corr = self.extract_color_correlation(image_rgb)
 
         features = {
             **dct_feats,
             **fft_feats,
+            **falloff_feats,
             "spectral_entropy": spectral_ent,
             "color_correlation": color_corr
         }
 
-        # Scorează față de fiecare semnătură
+        slope = features["spectral_falloff_slope"]
+        z = (FALLOFF_DECISION_BOUNDARY - slope) / (FALLOFF_SIGMOID_SCALE + 1e-6)
+        gen_probability = float(1.0 / (1.0 + np.exp(-z)))
+        
+        DETECTION_THRESHOLD = 0.65
+        is_generated = gen_probability >= DETECTION_THRESHOLD
+
+        detected_model = "Unknown"
         model_scores = {}
-        for model_name, sig in MODEL_SIGNATURES.items():
-            model_scores[model_name] = self.score_against_signature(features, sig)
+        
+        if is_generated:
+            for model_name, sig in MODEL_SIGNATURES.items():
+                if model_name == "Natural":
+                    continue
+                model_scores[model_name] = self.score_against_signature(features, sig)
+            if model_scores:
+                detected_model = max(model_scores.keys(), key=lambda k: model_scores[k])
 
-        best_model = max(model_scores, key=model_scores.get)
-        best_score = model_scores[best_model]
-
-        # Prag minim pentru a considera că e un deepfake generat cu tool cunoscut
-        IS_GENERATED_THRESHOLD = 0.52
+        confidence = gen_probability if is_generated else (1.0 - gen_probability)
 
         return {
-            "detected_model": best_model if best_score >= IS_GENERATED_THRESHOLD else "Unknown",
-            "model_description": MODEL_SIGNATURES[best_model]["description"] if best_score >= IS_GENERATED_THRESHOLD else "Model necunoscut sau conținut natural",
-            "confidence": round(best_score, 4),
-            "is_ai_generated": best_score >= IS_GENERATED_THRESHOLD,
-            "color_badge": MODEL_SIGNATURES[best_model]["color_badge"] if best_score >= IS_GENERATED_THRESHOLD else "#6b7280",
-            "all_scores": {k: round(v, 3) for k, v in model_scores.items()},
+            "detected_model": detected_model if is_generated else "Unknown",
+            "model_description": MODEL_SIGNATURES[detected_model]["description"] if is_generated else "Caracteristici spectrale consistente cu o fotografie naturală",
+            "confidence": round(confidence, 4),
+            "is_ai_generated": is_generated,
+            "color_badge": MODEL_SIGNATURES[detected_model]["color_badge"] if is_generated else "#22c55e",
+            "all_scores": {k: round(v, 3) for k, v in model_scores.items()} if is_generated else {},
             "spectral_features": {
                 "dct_energy_concentration": round(features["dct_energy_concentration"], 4),
                 "fft_high_freq_ratio": round(features["fft_high_freq_ratio"], 4),
+                "spectral_falloff_slope": round(features["spectral_falloff_slope"], 4),
                 "spectral_entropy": round(spectral_ent, 4),
                 "color_channel_correlation": round(color_corr, 4)
             }
         }
 
-
-# Instanță globală
 _analyzer = FingerprintAnalyzer()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────────────────────────────────────
 
 @app.post("/analyze")
 async def analyze_fingerprint(file: UploadFile = File(...)):
-    """
-    Analizează amprenta spectrală a imaginii și identifică modelul generator.
-    Returnează: detected_model, confidence, spectral_features, all_scores.
-    """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Agentul Fingerprint acceptă doar imagini.")
 
@@ -307,12 +361,11 @@ async def analyze_fingerprint(file: UploadFile = File(...)):
         content = await file.read()
         image_pil = Image.open(io.BytesIO(content)).convert("RGB")
 
-        # Resize la max 512x512 pentru performanță
         max_dim = 512
         w, h = image_pil.size
         if w > max_dim or h > max_dim:
             scale = max_dim / max(w, h)
-            image_pil = image_pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            image_pil = image_pil.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
         image_np = np.array(image_pil)
         result = _analyzer.analyze(image_np)
@@ -345,7 +398,6 @@ async def analyze_fingerprint(file: UploadFile = File(...)):
             "details": f"Fingerprint analysis error: {str(e)}"
         })
 
-
 @app.get("/health")
 async def health():
     return {
@@ -363,7 +415,6 @@ async def health():
         "supported_models": list(MODEL_SIGNATURES.keys())
     }
 
-
 @app.get("/")
 async def root():
     return {
@@ -373,18 +424,12 @@ async def root():
         "endpoint": "/analyze"
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MCP Auto-Registration cu Coordinator
-# ─────────────────────────────────────────────────────────────────────────────
-
 def register_with_coordinator():
-    """Se înregistrează automat cu Coordinator-ul via MCP Protocol."""
     mcp_payload = {
         "tool": {
             "name": "fingerprint",
             "display_name": "Fingerprint Analyzer",
-            "description": "GAN/Diffusion Model Attribution via DCT/FFT Spectral Analysis. Identifică dacă un deepfake a fost creat cu StableDiffusion, Midjourney, DALL-E, DeepFaceLab sau ProPainter.",
+            "description": "GAN/Diffusion Model Attribution via DCT/FFT Spectral Analysis.",
             "version": "1.0.0",
             "agent_type": "neural",
             "modality": "image",
@@ -399,11 +444,11 @@ def register_with_coordinator():
                 },
                 {
                     "name": "spectral_entropy",
-                    "description": "Welch spectral entropy — conținut natural vs AI-generated"
+                    "description": "Welch spectral entropy"
                 },
                 {
                     "name": "model_attribution",
-                    "description": "Identifică modelul generator: StableDiffusion, Midjourney, DALL-E, DeepFaceLab, ProPainter"
+                    "description": "Identifică modelul generator"
                 }
             ],
             "input_schema": {
@@ -441,15 +486,12 @@ def register_with_coordinator():
 
     logger.error("❌ Nu s-a putut înregistra cu Coordinator după toate reîncercările.")
 
-
 @app.on_event("startup")
 async def startup_event():
-    logger.info("🔬 Fingerprint Analyzer pornit — inițializare analiză spectrală...")
-    # Înregistrare asincronă în background
+    logger.info("🔬 Fingerprint Analyzer pornit")
     t = threading.Thread(target=register_with_coordinator, daemon=True)
     t.start()
     logger.info("🚀 Fingerprint Analyzer gata pe portul %d", AGENT_PORT)
-
 
 if __name__ == "__main__":
     import uvicorn

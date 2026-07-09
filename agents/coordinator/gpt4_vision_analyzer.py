@@ -25,8 +25,8 @@ from gemini_vision_analyzer import GeminiVisionAnalyzer
 
 logger = logging.getLogger("DeepGuard.GPT4Vision")
 
-# Compact prompt for GPT-4o (~150 tokens vs ~1050 for the Gemini prompt).
-# Keeping it short is critical: with detail="low" image tokens (~85) + this prompt (~150)
+# Compact prompt for GPT-4o (~220 tokens vs ~1400 for the Gemini prompt).
+# Keeping it short is important: with detail="low" image tokens (~85) + this prompt
 # we stay well under 512 input tokens, leaving plenty of room for max_tokens=2048 output.
 GPT4_ANALYSIS_PROMPT = """Analyze this image for deepfake/AI manipulation. Return ONLY a JSON object with exactly these fields:
 {{
@@ -36,7 +36,10 @@ GPT4_ANALYSIS_PROMPT = """Analyze this image for deepfake/AI manipulation. Retur
   "artifacts_detected": ["list of manipulation artifacts found, or empty list"],
   "authenticity_indicators": ["list of authentic features found, or empty list"]
 }}
-Inspect: skin texture uniformity, facial boundary blending, hair/teeth rendering, lighting consistency, GAN frequency artifacts, eye reflections, ear/jawline geometry. Context: {context}"""
+Inspect two groups of signals:
+(1) Face-SWAP tells: skin texture uniformity, facial boundary blending, hair/teeth rendering, lighting consistency, GAN frequency artifacts, eye reflections, ear/jawline geometry.
+(2) Full-scene generative tells (for whole-frame AI video/image generators like Veo, Sora, Imagen, Midjourney, which have no blending seam at all): camera sensor noise across the WHOLE frame vs. uniformly "denoised" look, background text legibility, whole-scene shadow/reflection physics, object permanence.
+IMPORTANT: absence of group-(1) artifacts does NOT prove authenticity — full-scene generators are expected to look clean there by design. Only mark REAL when you find POSITIVE group-(2) evidence (real sensor noise, correct scene-wide physics); otherwise prefer SUSPICIOUS over REAL. Context: {context}"""
 
 
 class GPT4VisionAnalyzer(GeminiVisionAnalyzer):

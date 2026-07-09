@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useRef } from 'react';
+import { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { MainLayout } from '@/layouts/MainLayout';
 import { PageHeader } from '@/components/shared/PageHeader';
@@ -26,6 +26,70 @@ import { JobDetails } from '@/types/analysis';
 // Charts
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
+// ── Grad-CAM Before/After Comparison Slider ───────────────────────────────
+function GradCamSlider({ originalSrc, heatmapSrc, alt }: { originalSrc: string; heatmapSrc: string; alt: string }) {
+  const [pos, setPos] = useState(50);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const updatePos = (clientX: number) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    setPos(Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100)));
+  };
+
+  useEffect(() => {
+    const onMove = (e: MouseEvent | TouchEvent) => {
+      if (!dragging.current) return;
+      updatePos('touches' in e ? e.touches[0].clientX : e.clientX);
+    };
+    const onUp = () => { dragging.current = false; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onMove as EventListener);
+    window.addEventListener('touchend', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onMove as EventListener);
+      window.removeEventListener('touchend', onUp);
+    };
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
+      className="relative w-full h-full select-none cursor-col-resize overflow-hidden"
+      onMouseDown={(e) => { dragging.current = true; updatePos(e.clientX); }}
+      onTouchStart={(e) => { dragging.current = true; updatePos(e.touches[0].clientX); }}
+    >
+      {/* Layer de bază: imaginea originală */}
+      <img src={originalSrc} alt={`${alt} original`} className="absolute inset-0 w-full h-full object-contain" draggable={false} />
+      {/* Layer superior: heatmap-ul, tăiat din dreapta sliderului */}
+      <img
+        src={heatmapSrc}
+        alt={`${alt} heatmap`}
+        className="absolute inset-0 w-full h-full object-contain"
+        style={{ clipPath: `inset(0 ${100 - pos}% 0 0)` }}
+        draggable={false}
+      />
+      {/* Linie de divizare */}
+      <div className="absolute top-0 bottom-0 w-0.5 bg-white/90 shadow-[0_0_8px_rgba(0,0,0,0.9)] pointer-events-none" style={{ left: `${pos}%` }}>
+        {/* Handle circular */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-9 h-9 rounded-full bg-white shadow-xl border-2 border-purple-500 flex items-center justify-center pointer-events-none">
+          <svg width="16" height="10" viewBox="0 0 16 10" fill="none">
+            <path d="M1 5H15M1 5L4.5 1.5M1 5L4.5 8.5M15 5L11.5 1.5M15 5L11.5 8.5" stroke="#7c3aed" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </div>
+      </div>
+      {/* Etichete */}
+      <div className="absolute bottom-2 left-2 text-[9px] font-bold text-white bg-black/65 px-1.5 py-0.5 rounded pointer-events-none">ORIGINAL</div>
+      <div className="absolute bottom-2 right-2 text-[9px] font-bold text-purple-200 bg-purple-900/75 px-1.5 py-0.5 rounded pointer-events-none">GRAD-CAM</div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function Results() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -47,6 +111,18 @@ export default function Results() {
   const [suggestedQuestions, setSuggestedQuestions] = useState<string[]>([]);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  // Reset all per-job state when navigating between two /results/:id pages — this
+  // component isn't remounted on an id-only route change, so without this the
+  // previous job's verdict/evidence/chat stayed on screen under the new job's ID.
+  useEffect(() => {
+    setJobDetails(null);
+    setLoading(true);
+    setError(null);
+    setChatMessages([]);
+    setChatInput('');
+    setSuggestedQuestions([]);
+  }, [id]);
+
   const sendChatMessage = (text: string) => {
     if (!text.trim() || !chatWs) return;
     chatWs.send(JSON.stringify({ message: text.trim() }));
@@ -60,37 +136,46 @@ export default function Results() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages]);
 
-  // Poll for updates
-  useEffect(() => {
-    const fetchJobDetails = async () => {
-      try {
-        if (!token || !id) return;
+  const fetchJobDetails = useCallback(async () => {
+    try {
+      if (!token || !id) return;
 
-        // Handle ID format (strip 'job-' if present)
-        const cleanId = id.replace('job-', '');
+      // Handle ID format (strip 'job-' if present)
+      const cleanId = id.replace('job-', '');
 
-        const response = await fetch(`${DEEPGUARD_API_URL}/jobs/${cleanId}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        });
+      const response = await fetch(`${DEEPGUARD_API_URL}/jobs/${cleanId}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
 
-        if (!response.ok) throw new Error('Failed to fetch job');
+      if (!response.ok) throw new Error('Failed to fetch job');
 
-        const data = await response.json();
-        setJobDetails(data);
+      const data = await response.json();
+      setJobDetails(data);
 
-        if (data.status === 'completed' || data.status === 'failed') {
-          setLoading(false);
-        }
-
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Unknown error');
+      if (data.status === 'completed' || data.status === 'failed') {
         setLoading(false);
       }
-    };
 
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unknown error');
+      setLoading(false);
+    }
+  }, [id, token]);
+
+  const cleanJobIdForTracking = id?.replace('job-', '') || '';
+  const isGloballyTracked = analysisState.jobId === cleanJobIdForTracking;
+
+  // Poll for updates. If this exact job is already being tracked by the global
+  // WebSocketContext (live WS push + its own 3s REST fallback poll of the same
+  // /jobs/{id} endpoint), don't run a second independent 3s poll here too - that was
+  // hitting the endpoint twice every 3s with no coordination between the two. Only run
+  // our own poll when nothing else is already tracking this job (e.g. viewing an older/
+  // different job straight from a link, not the one that's actively being analyzed).
+  useEffect(() => {
     fetchJobDetails();
 
-    // Poll every 3s if not complete
+    if (isGloballyTracked) return;
+
     const interval = setInterval(() => {
       if (jobDetails?.status !== 'completed' && jobDetails?.status !== 'failed') {
         fetchJobDetails();
@@ -99,7 +184,17 @@ export default function Results() {
 
     return () => clearInterval(interval);
 
-  }, [id, token, jobDetails?.status]);
+  }, [id, token, jobDetails?.status, isGloballyTracked, fetchJobDetails]);
+
+  // When the globally-tracked job finishes, do one fetch for the full result (verdict,
+  // agent breakdown, evidence) - the shared analysisState only carries progress/stage,
+  // not the full job object, so this can't be skipped even though progress is covered above.
+  useEffect(() => {
+    if (isGloballyTracked && !analysisState.isProcessing &&
+        jobDetails?.status !== 'completed' && jobDetails?.status !== 'failed') {
+      fetchJobDetails();
+    }
+  }, [isGloballyTracked, analysisState.isProcessing, jobDetails?.status, fetchJobDetails]);
 
   // Chat WebSocket (only when analysis is complete)
   // Use a ref to track if we already connected — prevents re-render from killing the WS
@@ -195,6 +290,51 @@ export default function Results() {
 
   const isFake = jobDetails?.verdict?.toUpperCase().includes('FAKE');
   const isFinished = jobDetails?.status === 'completed';
+  const isFailed = jobDetails?.status === 'failed';
+
+  // --- ERROR STATE (fetch never succeeded — e.g. auth expired, rate-limited, network down) ---
+  if (error && !jobDetails) {
+    return (
+      <MainLayout>
+        <div className="p-6 lg:p-8 max-w-2xl mx-auto space-y-4">
+          <Card className="border-destructive/40">
+            <CardContent className="p-6 flex flex-col items-center text-center gap-3">
+              <AlertTriangle className="h-10 w-10 text-destructive" />
+              <h1 className="text-xl font-bold">Nu am putut încărca analiza</h1>
+              <p className="text-sm text-muted-foreground">{error}</p>
+              <div className="flex gap-2 pt-2">
+                <Button variant="outline" onClick={() => window.location.reload()}>Reîncearcă</Button>
+                <Button onClick={() => navigate('/upload')}>Analiză nouă</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </MainLayout>
+    );
+  }
+
+  // --- FAILED STATE (job ran but the analysis errored out server-side) ---
+  if (isFailed) {
+    return (
+      <MainLayout>
+        <div className="p-6 lg:p-8 max-w-2xl mx-auto space-y-4">
+          <Card className="border-destructive/40">
+            <CardContent className="p-6 flex flex-col items-center text-center gap-3">
+              <AlertTriangle className="h-10 w-10 text-destructive" />
+              <h1 className="text-xl font-bold">Analiza a eșuat</h1>
+              <p className="text-sm text-muted-foreground">
+                {jobDetails?.error || jobDetails?.message || jobDetails?.reasoning || 'A apărut o eroare tehnică în timpul analizei acestui fișier.'}
+              </p>
+              <div className="flex gap-2 pt-2">
+                <Button variant="outline" onClick={() => navigate('/jobs')}>Vezi toate joburile</Button>
+                <Button onClick={() => navigate('/upload')}>Încearcă din nou</Button>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </MainLayout>
+    );
+  }
 
   // --- LOADING STATE ---
   if (!isFinished && !jobDetails?.verdict) {
@@ -213,6 +353,13 @@ export default function Results() {
               {isConnected ? "CORTEX_LIVE_LINK" : "CONNECTING..."}
             </Badge>
           </div>
+
+          {error && (
+            <div className="flex items-center gap-2 text-sm text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-3 py-2">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>Ultima verificare a stării a eșuat: {error}. Reîncerc automat...</span>
+            </div>
+          )}
 
           <Progress value={jobDetails?.progress || analysisState.progress} className="h-2" />
 
@@ -339,13 +486,33 @@ export default function Results() {
                     if (!agentData || typeof agentData !== 'object') return null;
                     const verdict = String(agentData.verdict || 'N/A').toUpperCase();
                     if (verdict === 'N/A' || verdict === 'ERROR' || verdict === 'UNKNOWN') return null;
-                    const fakeProbRaw = agentData.fake_probability ?? agentData.confidence ?? 0;
-                    const fakeProb = typeof fakeProbRaw === 'number' ? (fakeProbRaw > 1 ? fakeProbRaw : fakeProbRaw * 100) : 0;
+                    // Some agents (e.g. gemini_vision) never set fake_probability - only
+                    // "confidence", which means "how sure the agent is about its own verdict",
+                    // not "probability of fake". Falling back to it directly (old behavior)
+                    // rendered a REAL verdict with high confidence as a big red "fake" bar -
+                    // backwards. When falling back, flip it based on verdict direction first.
+                    let fakeProb: number;
+                    if (typeof agentData.fake_probability === 'number') {
+                      const raw = agentData.fake_probability;
+                      fakeProb = raw > 1 ? raw : raw * 100;
+                    } else {
+                      const rawConf = typeof agentData.confidence === 'number' ? agentData.confidence : 0;
+                      const confPct = rawConf > 1 ? rawConf : rawConf * 100;
+                      const isRealVerdict = verdict === 'REAL' || verdict === 'AUTHENTIC';
+                      fakeProb = isRealVerdict ? (100 - confPct) : confPct;
+                    }
                     const agentIsFake = verdict === 'FAKE' || verdict === 'SUSPICIOUS';
                     const isSuspicious = verdict === 'SUSPICIOUS';
 
                     const iconMap: Record<string, any> = { vision: Eye, audio: Mic, video: Video, text: Type, gemini_vision: Bot, bio: Activity, fingerprint: Fingerprint };
                     const IconComp = iconMap[agentName] || Activity;
+                    // get_vision_analyzer() (coordinator) picks GPT-4o by default and only
+                    // falls back to Gemini if GPT-4o fails to init, so "gemini_vision" results
+                    // are usually actually GPT-4o's. Use the backend-reported provider if
+                    // present instead of hardcoding "Gemini Vision" for this key.
+                    const displayName = agentName === 'gemini_vision'
+                      ? (agentData.analyzer_provider || 'Gemini Vision')
+                      : agentName.replace('_', ' ');
 
                     // Extract artifacts if available
                     const artifacts: string[] = agentData.artifacts_detected || agentData.anomalies || [];
@@ -367,7 +534,7 @@ export default function Results() {
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center justify-between mb-2">
-                              <span className="font-bold text-sm capitalize tracking-wide">{agentName.replace('_', ' ')}</span>
+                              <span className="font-bold text-sm capitalize tracking-wide">{displayName}</span>
                               <Badge variant={agentIsFake ? 'destructive' : 'secondary'} className={cn("text-xs font-bold px-2.5 py-1",
                                 isSuspicious && 'bg-amber-600 hover:bg-amber-700')}>
                                 {verdict}
@@ -502,6 +669,7 @@ export default function Results() {
                     {fp.spectral_features && (
                       <div className="grid grid-cols-2 gap-2 pt-1">
                         {[
+                          { label: 'Spectral Falloff', val: fp.spectral_features.spectral_falloff_slope },
                           { label: 'DCT Concentration', val: fp.spectral_features.dct_energy_concentration },
                           { label: 'FFT High-Freq', val: fp.spectral_features.fft_high_freq_ratio },
                           { label: 'Spectral Entropy', val: fp.spectral_features.spectral_entropy },
@@ -580,22 +748,30 @@ export default function Results() {
                                 ? 'border-green-500/20 hover:border-green-500/40 shadow-green-500/5'
                                 : 'border-yellow-500/20 hover:border-yellow-500/40'
                           )}>
-                            {/* Image */}
+                            {/* Image / Grad-CAM Slider */}
                             <div className="relative bg-muted/50 aspect-video overflow-hidden">
-                              <img
-                                src={
-                                  item.base64_image
-                                    ? item.base64_image
-                                    : item.url?.startsWith('http')
-                                      ? item.url
-                                      : `${DEEPGUARD_API_URL}${item.url}`
-                                }
-                                alt={item.title || `Evidence ${idx + 1}`}
-                                className="w-full h-full object-contain opacity-95 group-hover:opacity-100 transition-opacity duration-300"
-                                onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                              />
-                              {/* Grad-CAM badge */}
-                              {item.type === 'grad_cam' && (
+                              {item.type === 'grad_cam' && item.original_base64 ? (
+                                <GradCamSlider
+                                  originalSrc={item.original_base64}
+                                  heatmapSrc={item.base64_image}
+                                  alt={item.title || 'Grad-CAM'}
+                                />
+                              ) : (
+                                <img
+                                  src={
+                                    item.base64_image
+                                      ? item.base64_image
+                                      : item.url?.startsWith('http')
+                                        ? item.url
+                                        : `${DEEPGUARD_API_URL}${item.url}`
+                                  }
+                                  alt={item.title || `Evidence ${idx + 1}`}
+                                  className="w-full h-full object-contain opacity-95 group-hover:opacity-100 transition-opacity duration-300"
+                                  onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                                />
+                              )}
+                              {/* Grad-CAM badge (doar când nu avem slider, ca să nu se suprapună cu etichetele lui) */}
+                              {item.type === 'grad_cam' && !item.original_base64 && (
                                 <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-700/90 text-purple-100 border border-purple-400/30 backdrop-blur-sm">
                                   Grad-CAM XAI
                                 </div>

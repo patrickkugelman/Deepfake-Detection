@@ -1,9 +1,10 @@
 import { ReactNode } from 'react';
 import { SidebarProvider } from '@/components/ui/sidebar';
-import { ChatAssistant } from "@/components/ChatAssistant";
+import { ChatAssistant } from "@/components/shared/ChatAssistant";
 import { AppSidebar } from "@/components/shared/AppSidebar";
 import { Navbar } from "@/components/shared/Navbar";
-import { AnalysisBanner } from "@/components/AnalysisBanner";
+import { useAnalysisBanner } from "@/hooks/useAnalysisBanner";
+import { cn } from "@/lib/utils";
 
 interface MainLayoutProps {
   children: ReactNode;
@@ -14,13 +15,17 @@ interface MainLayoutProps {
  * Include Sidebar, Navbar și Asistentul AI (Cortex Chat).
  */
 export const MainLayout = ({ children }: MainLayoutProps) => {
+  // Reserve space so the globally-rendered <AnalysisBanner /> (App.tsx) never covers the Navbar
+  const { variant } = useAnalysisBanner();
+
   return (
     <SidebarProvider>
-      <div className="min-h-screen flex w-full bg-background flex-col overflow-hidden">
+      <div className={cn(
+        "min-h-screen flex w-full bg-background flex-col overflow-hidden",
+        variant !== null && "pt-10"
+      )}>
         {/* Top Navbar - Fixat în partea de sus */}
         <Navbar />
-        {/* Persistent analysis banner - allows navigation during processing */}
-        <AnalysisBanner />
 
         <div className="flex flex-1 overflow-hidden relative">
           {/* Bara Laterală de Navigare */}

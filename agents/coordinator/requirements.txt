@@ -62,6 +62,12 @@ reportlab>=4.1.0
 # Email
 fastapi-mail==1.4.1
 
+# Stripe billing
+stripe>=8.0.0
+
+# Slack SDK
+slack-sdk>=3.27.0
+
 # OpenTelemetry / SigNoz Observability
 opentelemetry-api>=1.25.0
 opentelemetry-sdk>=1.25.0

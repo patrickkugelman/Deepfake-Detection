@@ -12,7 +12,6 @@ import { analyzeFile, getJobStatus } from '@/api';
 import { useAuth } from '@/context/AuthContext';
 import { toast } from 'sonner';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import { useAnalysis } from '@/contexts/AnalysisContext';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 export default function Upload() {
@@ -24,7 +23,6 @@ export default function Upload() {
 
   // Consumăm starea globală a analizei din WebSocketContext
   const { analysisState, setAnalysisState, resetAnalysis, isConnected } = useWebSocket();
-  const { addJob } = useAnalysis();
   const { isProcessing, progress, stage, logs, jobId } = analysisState;
 
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -134,7 +132,6 @@ export default function Upload() {
         progress: 15
       }));
 
-      addJob({ job_id: jobResponse.job_id, filename: file.name, progress: 0 });
       toast.info("Analiza a început", { description: "Cortex coordonează agenții de detecție." });
 
       // Navigate immediately - no blocking

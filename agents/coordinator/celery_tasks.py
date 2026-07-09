@@ -251,7 +251,9 @@ async def call_agent_async(name: str, endpoint: str, content: bytes, filename: s
                     text_content = content.decode("latin-1", errors="replace")
                 response = await client.post(endpoint, json={"text": text_content})
             else:
-                files = {'file': (filename, content, 'application/octet-stream')}
+                import mimetypes
+                mime_type = mimetypes.guess_type(filename)[0] or 'application/octet-stream'
+                files = {'file': (filename, content, mime_type)}
                 response = await client.post(endpoint, files=files)
 
             response.raise_for_status()
@@ -317,6 +319,46 @@ def extract_audio_from_video(video_content: bytes, file_type: str) -> Optional[b
             os.remove(tmp_audio_path)
 
 
+def extract_frame_from_video(video_content: bytes) -> Optional[bytes]:
+    """Extract a single representative (middle) frame as JPEG bytes.
+
+    The `fingerprint` agent only accepts images (content-type image/*), but it's routed
+    as part of the video pipeline. Without this, every fingerprint call for a video gets
+    HTTP 400 and is dropped as ERROR — this gives it an actual frame to analyze instead.
+    """
+    if not METADATA_EXTRACTION_AVAILABLE:
+        return None
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            tmp.write(video_content)
+            tmp_path = tmp.name
+
+        cap = cv2.VideoCapture(tmp_path)
+        if not cap.isOpened():
+            return None
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames // 2)
+
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            return None
+
+        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        if not success:
+            return None
+        return buffer.tobytes()
+    except Exception as e:
+        logger.warning(f"⚠️ Frame extraction for fingerprint failed: {e}")
+        return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 def select_agents_by_filetype(file_type: str, filename: str) -> List[str]:
     """
     Smart agent selection based on file extension.
@@ -325,10 +367,11 @@ def select_agents_by_filetype(file_type: str, filename: str) -> List[str]:
     ext = file_type.lower()
     name_lower = (filename or "").lower()
     
-    # Image files → vision + fingerprint (PIL-based, cannot handle video)
+    # Image files → vision + fingerprint + bio (bio runs an image-plausibility check,
+    # not pulse detection, for stills - see agents/bio/api.py analyze_image_biology)
     if any(x in ext for x in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff']):
-        logger.info(f"📸 Image detected ({ext}). Routing to: vision + fingerprint agents")
-        return ["vision", "fingerprint"]
+        logger.info(f"📸 Image detected ({ext}). Routing to: vision + fingerprint + bio agents")
+        return ["vision", "fingerprint", "bio"]
 
     # Video files → video + bio + audio + fingerprint (audio track extracted by pipeline via ffmpeg)
     elif any(x in ext for x in VIDEO_EXTENSIONS):
@@ -416,9 +459,18 @@ async def run_analysis_pipeline(
         if audio_content is None:
             logger.warning("⚠️ No audio extracted — removing audio agent from pipeline")
             selected_agents = [a for a in selected_agents if a != "audio"]
+
+    # Fingerprint agent only accepts images — give it one extracted frame for video
+    fingerprint_frame_content = None
+    if is_video and "fingerprint" in selected_agents:
+        fingerprint_frame_content = extract_frame_from_video(content)
+        if fingerprint_frame_content is None:
+            logger.warning("⚠️ No frame extracted for fingerprint — removing fingerprint agent from pipeline")
+            selected_agents = [a for a in selected_agents if a != "fingerprint"]
+
     update_job_status(job_id, "processing", 50, f"Analiză cu {len(selected_agents)} agenți neurali...")
 
-    # Build parallel tasks — audio agent gets extracted audio, others get original content
+    # Build parallel tasks — audio/fingerprint agents get pre-processed content, others get original
     tasks = []
     actual_agents = []
     for agent in selected_agents:
@@ -427,6 +479,9 @@ async def run_analysis_pipeline(
         if agent == "audio" and is_video and audio_content is not None:
             audio_filename = filename.rsplit('.', 1)[0] + ".wav"
             tasks.append(call_agent_async(agent, AGENT_REGISTRY[agent], audio_content, audio_filename))
+        elif agent == "fingerprint" and is_video and fingerprint_frame_content is not None:
+            frame_filename = filename.rsplit('.', 1)[0] + "_frame.jpg"
+            tasks.append(call_agent_async(agent, AGENT_REGISTRY[agent], fingerprint_frame_content, frame_filename))
         else:
             tasks.append(call_agent_async(agent, AGENT_REGISTRY[agent], content, filename))
         actual_agents.append(agent)
@@ -482,6 +537,14 @@ async def run_analysis_pipeline(
             os.remove(tmp_path)  # Cleanup
 
             if gemini_analysis and 'error' not in gemini_analysis:
+                # get_vision_analyzer() picks GPT-4o by default (ENABLE_GPT4_VISION=true +
+                # OPENAI_API_KEY set) and only falls back to Gemini if GPT-4o fails to init -
+                # so this result is usually actually GPT-4o's, even though it's stored under
+                # the legacy "gemini_vision" key. Tag which provider really produced it so the
+                # frontend doesn't hardcode a "Gemini Vision" label regardless of which one ran.
+                gemini_analysis["analyzer_provider"] = (
+                    "GPT-4o Vision" if vision_analyzer_name == "GPT4VisionAnalyzer" else "Gemini Vision"
+                )
                 agent_results["gemini_vision"] = gemini_analysis
                 logger.info(f"🤖 {vision_analyzer_name}: {gemini_analysis.get('verdict', 'N/A')} ({gemini_analysis.get('confidence', 0):.0%})")
 
@@ -743,7 +806,52 @@ async def run_analysis_pipeline(
         logger.warning("📧 Email not sent: EmailNotifier not available (check MAIL_* env and email_notifier import)")
     
     logger.info(f"✅ Job {job_id} COMPLETED: {final_verdict} ({confidence:.2f})")
-    
+
+    # Record usage metrics (DailyUsage node) — post-completion so verdict is known
+    try:
+        from usage_tracking import record_daily_usage
+        # best-effort: fetch api_key_prefix from job if it was created via API key
+        prefix_row = neo4j_conn.query(
+            "MATCH (j:Job {id: $id}) RETURN coalesce(j.api_key_prefix, '') as prefix",
+            {"id": job_id}
+        )
+        prefix = prefix_row[0]["prefix"] if prefix_row else ""
+        record_daily_usage(
+            neo4j_conn,
+            username=username,
+            api_key_prefix=prefix,
+            verdict=final_verdict,
+            file_type=file_type,
+        )
+    except Exception as e:
+        logger.warning(f"record_daily_usage failed (non-fatal): {e}")
+
+    # ========================================================================
+    # STEP 9: Fire outbound webhooks (analysis.completed)
+    # ========================================================================
+    try:
+        from webhooks import get_user_webhooks_for_event, build_analysis_completed_payload
+        hooks = get_user_webhooks_for_event(neo4j_conn, username, "analysis.completed")
+        if hooks:
+            payload = build_analysis_completed_payload({
+                "job_id": job_id,
+                "status": "completed",
+                "verdict": final_verdict,
+                "confidence": confidence,
+                "reasoning": reasoning,
+                "file_type": file_type,
+                "filename": filename,
+                "details": {"agents_used": selected_agents},
+            })
+            for h in hooks:
+                try:
+                    deliver_webhook.delay(h["webhook_id"], payload)
+                except Exception as e:
+                    logger.warning(f"Failed to enqueue webhook {h.get('webhook_id')}: {e}")
+            logger.info(f"🪝 Queued {len(hooks)} webhook deliveries for job {job_id}")
+    except Exception as e:
+        logger.warning(f"Webhook dispatch failed (non-fatal): {e}")
+
     return {
         "job_id": job_id,
         "verdict": final_verdict,
@@ -761,9 +869,6 @@ async def run_analysis_pipeline(
     name='process_media_analysis',
     max_retries=3,
     default_retry_delay=60,
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_jitter=True
 )
 def process_media_analysis(
     self,
@@ -944,23 +1049,121 @@ def cleanup_old_jobs():
             DETACH DELETE j
             RETURN count(j) as deleted
         """)
-        
+
         count = result[0].get('deleted', 0) if result else 0
         logger.info(f"🧹 Cleaned up {count} old jobs")
-        
+
         return {"deleted": count}
     except Exception as e:
         logger.error(f"❌ Cleanup failed: {e}")
         return {"error": str(e)}
 
 
+@celery_app.task(
+    bind=True,
+    name='deliver_webhook',
+    max_retries=3,
+    default_retry_delay=60,
+)
+def deliver_webhook(self, webhook_id: str, payload: Dict[str, Any]):
+    """
+    Deliver a signed HMAC-SHA256 webhook payload to a user-registered URL.
+    Retries up to 3 times with delays from WEBHOOK_RETRY_DELAYS.
+    After WEBHOOK_MAX_FAILURES, the webhook is auto-disabled.
+    """
+    try:
+        from webhooks import (
+            get_webhook,
+            _get_plain_secret,
+            sign_payload,
+            record_delivery_success,
+            record_delivery_failure,
+            WEBHOOK_RETRY_DELAYS,
+        )
+    except ImportError as e:
+        logger.error(f"❌ Webhook module import failed: {e}")
+        return {"error": "module_unavailable"}
+
+    hook = get_webhook(neo4j_conn, webhook_id)
+    if not hook:
+        logger.warning(f"🪝 Webhook {webhook_id} not found — skipping")
+        return {"error": "not_found"}
+    if not hook.get("is_active"):
+        logger.info(f"🪝 Webhook {webhook_id} is disabled — skipping")
+        return {"error": "disabled"}
+
+    secret = _get_plain_secret(neo4j_conn, webhook_id)
+    if not secret:
+        logger.error(f"🪝 Webhook {webhook_id} has no stored secret — cannot sign")
+        record_delivery_failure(neo4j_conn, webhook_id)
+        return {"error": "no_secret"}
+
+    body_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = sign_payload(body_bytes, secret)
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "DeepGuard-Webhooks/1.0",
+        "X-DeepGuard-Event": payload.get("event", "unknown"),
+        "X-DeepGuard-Webhook-Id": webhook_id,
+        "X-DeepGuard-Signature": signature,
+        "X-DeepGuard-Timestamp": payload.get("timestamp", ""),
+    }
+
+    url = hook["url"]
+    try:
+        with httpx.Client(timeout=15.0) as client:
+            resp = client.post(url, content=body_bytes, headers=headers)
+        if 200 <= resp.status_code < 300:
+            record_delivery_success(neo4j_conn, webhook_id)
+            logger.info(f"🪝 Webhook {webhook_id} delivered OK ({resp.status_code}) -> {url}")
+            return {"ok": True, "status": resp.status_code}
+        else:
+            fc = record_delivery_failure(neo4j_conn, webhook_id)
+            logger.warning(f"🪝 Webhook {webhook_id} delivery failed {resp.status_code} (failures={fc})")
+            # Retry on 5xx / 429; skip retry on 4xx (client error, bad endpoint)
+            if resp.status_code >= 500 or resp.status_code == 429:
+                delay_idx = min(self.request.retries, len(WEBHOOK_RETRY_DELAYS) - 1)
+                raise self.retry(countdown=WEBHOOK_RETRY_DELAYS[delay_idx])
+            return {"ok": False, "status": resp.status_code}
+    except httpx.HTTPError as e:
+        fc = record_delivery_failure(neo4j_conn, webhook_id)
+        logger.warning(f"🪝 Webhook {webhook_id} HTTP error (failures={fc}): {e}")
+        delay_idx = min(self.request.retries, len(WEBHOOK_RETRY_DELAYS) - 1)
+        raise self.retry(exc=e, countdown=WEBHOOK_RETRY_DELAYS[delay_idx])
+
+
+@celery_app.task(name='reset_monthly_quotas')
+def reset_monthly_quotas():
+    """
+    Reset monthly_usage counters for all users.
+    Runs on day 1 of each month at 00:00 UTC.
+    """
+    try:
+        from usage_tracking import reset_all_monthly_quotas, cleanup_old_daily_usage
+        updated = reset_all_monthly_quotas(neo4j_conn)
+        cleaned = cleanup_old_daily_usage(neo4j_conn, keep_days=180)
+        logger.info(f"🔄 Monthly reset: {updated} users, {cleaned} old DailyUsage nodes purged")
+        return {"users_reset": updated, "daily_usage_purged": cleaned}
+    except Exception as e:
+        logger.error(f"❌ Monthly reset failed: {e}")
+        return {"error": str(e)}
+
+
 # ============================================================================
 # CELERY BEAT SCHEDULE (Periodic Tasks)
 # ============================================================================
+from celery.schedules import crontab
+
 celery_app.conf.beat_schedule = {
     'cleanup-old-jobs-daily': {
         'task': 'cleanup_old_jobs',
         'schedule': 86400.0,  # Every 24 hours
+    },
+    'reset-monthly-quotas': {
+        'task': 'reset_monthly_quotas',
+        # Day 1 of each month at 00:00 UTC
+        'schedule': crontab(minute=0, hour=0, day_of_month=1),
     },
 }
 

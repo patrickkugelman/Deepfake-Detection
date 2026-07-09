@@ -81,27 +81,50 @@ Analyze this image frame for signs of digital manipulation. Examine every pixel 
 - [ ] Hair: realistic individual strands or uniform blob texture?
 - [ ] Jewelry/glasses: coherent or distorted at face boundaries?
 
+### CATEGORY G — Full-Scene Generative Signals (weight: VERY HIGH)
+Categories A-F target classic face-SWAP tells (a real background plate + a pasted/blended face).
+Modern text-to-image/video models (Google Veo/Imagen, OpenAI Sora, Midjourney, Flux) synthesize
+the ENTIRE frame from scratch — there is no donor face and no blending seam, so A-F often look
+completely clean on fully synthetic content. This category looks for whole-scene tells instead:
+- [ ] Camera sensor noise: fine, consistent grain across the whole frame (real optics/sensor), or
+      does the image look uniformly "denoised"/airbrushed everywhere, including the background?
+- [ ] Background text/signage: legible, correctly-formed characters, or warped/garbled/nonsense glyphs?
+- [ ] Object permanence: do background objects (hands, crowds, furniture, architecture) have
+      consistent counts and plausible geometry, or subtle extra/fused/melting elements?
+- [ ] Shadow & reflection physics across the ENTIRE scene (not just the subject): one consistent
+      light source and length for every shadow; physically correct reflections in glass/water/metal?
+- [ ] Depth-of-field: does blur behave like a real lens given the scene's depth, or is
+      focus suspiciously uniform/inconsistent?
+
 ## FRAME CONTEXT
 {context}
 
 ## SCORING RUBRIC
-- **0.90–1.00**: Multiple strong artifacts confirmed → definitive FAKE
+- **0.90–1.00**: Multiple strong artifacts confirmed (any category) → definitive FAKE
 - **0.75–0.90**: Clear artifacts in 1-2 high-weight categories → FAKE
 - **0.60–0.75**: Suspicious but not conclusive → SUSPICIOUS
 - **0.45–0.60**: Mixed/unclear signals → SUSPICIOUS with low confidence
-- **0.70–0.85**: Strong authenticity indicators, no artifacts → REAL
-- **0.85–1.00**: No artifacts, strong natural indicators → REAL
+- **0.70–0.85**: Strong POSITIVE authenticity indicators from Category G (real sensor noise,
+  physics-consistent whole-scene shadows/reflections, legible background text) → REAL
+- **0.85–1.00**: Strong Category G evidence + no artifacts anywhere else → REAL
 
 ## RESPONSE FORMAT
 Respond with ONLY valid JSON (no markdown code blocks, no extra text):
 {{"verdict": "REAL" | "FAKE" | "SUSPICIOUS", "confidence": <float 0.0-1.0>, "reasoning": "<3-4 sentences: state what you found, WHERE specifically, and why it indicates manipulation or authenticity>", "artifacts_detected": ["<specific artifact with location, e.g. 'Halo blending artifact along left jaw edge'>"], "authenticity_indicators": ["<specific real indicator, e.g. 'Consistent iris fiber pattern in both eyes'>"], "examined_regions": ["<which face regions you analyzed>"]}}
 
 ## CRITICAL RULES
-1. NEVER default to REAL without examining all 6 categories
-2. Report artifacts with SPECIFIC LOCATIONS (left eye, jaw edge, hair boundary, etc.)
+1. NEVER default to REAL without examining all 7 categories
+2. Report artifacts with SPECIFIC LOCATIONS (left eye, jaw edge, hair boundary, background window, etc.)
 3. If no face detected: return INCONCLUSIVE with confidence 0.5
 4. confidence 0.5 means genuinely uncertain — use it sparingly
-5. A single high-weight artifact (Category C, D, or F) is sufficient for FAKE verdict at 0.75+"""
+5. A single high-weight artifact (Category C, D, F, or G) is sufficient for FAKE verdict at 0.75+
+6. THE ABSENCE OF SWAP ARTIFACTS (A-F) DOES NOT PROVE AUTHENTICITY. Full-scene generative models
+   have no blending seam to find by design — clean face geometry/lighting/skin is EXPECTED from
+   them, not evidence of a real camera. A REAL verdict requires POSITIVE evidence from Category G,
+   not merely the absence of Category A-F artifacts.
+7. If A-F show no artifacts but Category G ALSO shows no positive real-camera evidence (image looks
+   generically clean/synthetic with no analyzable sensor noise or scene-physics detail), return
+   SUSPICIOUS at 0.55–0.65 — this is unresolved provenance, not confirmed authenticity."""
 
 
 class GeminiVisionAnalyzer:
@@ -181,41 +204,54 @@ class GeminiVisionAnalyzer:
             # Deduplicate and sort
             indices = sorted(set(max(0, min(i, total_frames - 1)) for i in indices))[:target_count]
 
-            # Read only the target frames (seek instead of sequential)
-            for extracted_idx, frame_idx in enumerate(indices):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            # Single sequential pass, picking off target frames as we encounter them.
+            # Repeatedly seeking via CAP_PROP_POS_FRAMES (one seek per target index) is
+            # unreliable on many H.264/MP4 encodes — it snaps to the nearest keyframe
+            # rather than the exact requested frame, which in practice produced several
+            # "different" timestamps that decoded to near-identical frames. A single
+            # forward scan guarantees each target index gets its actual frame content.
+            target_indices = set(indices)
+            last_target = indices[-1]
+            current_frame_idx = 0
+            extracted_count = 0
+
+            while current_frame_idx <= last_target:
                 ret, frame = cap.read()
                 if not ret or frame is None:
-                    continue
+                    break
 
-                timestamp = frame_idx / fps if fps > 0 else 0
+                if current_frame_idx in target_indices:
+                    extracted_count += 1
+                    timestamp = current_frame_idx / fps if fps > 0 else 0
 
-                # Resize to max 1024px
-                height, width = frame.shape[:2]
-                max_dim = 1024
-                if max(height, width) > max_dim:
-                    scale = max_dim / max(height, width)
-                    frame_resized = cv2.resize(frame, (int(width * scale), int(height * scale)))
-                else:
-                    frame_resized = frame.copy()
+                    # Resize to max 1024px
+                    height, width = frame.shape[:2]
+                    max_dim = 1024
+                    if max(height, width) > max_dim:
+                        scale = max_dim / max(height, width)
+                        frame_resized = cv2.resize(frame, (int(width * scale), int(height * scale)))
+                    else:
+                        frame_resized = frame.copy()
 
-                # Encode to JPEG
-                _, buffer = cv2.imencode('.jpg', cast(Any, frame_resized), [cv2.IMWRITE_JPEG_QUALITY, 85])
-                frame_bytes = buffer.tobytes()
-                frame_b64 = base64.b64encode(frame_bytes).decode('utf-8')
+                    # Encode to JPEG
+                    _, buffer = cv2.imencode('.jpg', cast(Any, frame_resized), [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    frame_bytes = buffer.tobytes()
+                    frame_b64 = base64.b64encode(frame_bytes).decode('utf-8')
 
-                frames_data.append({
-                    "image_b64": frame_b64,
-                    "timestamp": timestamp,
-                    "frame_number": frame_idx,
-                    "extracted_index": extracted_idx + 1,
-                    "opencv_frame": frame_resized
-                })
+                    frames_data.append({
+                        "image_b64": frame_b64,
+                        "timestamp": timestamp,
+                        "frame_number": current_frame_idx,
+                        "extracted_index": extracted_count,
+                        "opencv_frame": frame_resized
+                    })
 
-                logger.info(f"Extracted frame {extracted_idx + 1}/{len(indices)} (frame #{frame_idx}) at {timestamp:.1f}s")
+                    logger.info(f"Extracted frame {extracted_count}/{len(indices)} (frame #{current_frame_idx}) at {timestamp:.1f}s")
+
+                current_frame_idx += 1
 
             cap.release()
-            logger.info(f"Extracted {len(frames_data)} strategic frames")
+            logger.info(f"Extracted {len(frames_data)} strategic frames (sequential scan)")
 
         except Exception as e:
             logger.error(f"Frame extraction failed: {e}")

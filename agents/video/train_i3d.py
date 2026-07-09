@@ -1,5 +1,5 @@
 """
-DeepGuard Pro - I3D Video Deepfake Training
+DeepGuard Pro - I3D Video Deepfake Training (Optimized with Decord & V2)
 Features:
 - Dedicated I3D (Inflated 3D ConvNet) training
 - Mixup & CutMix augmentation
@@ -7,17 +7,19 @@ Features:
 - Automatic Mixed Precision (AMP)
 - WeightedRandomSampler (Class Imbalance Fix)
 - Progress Bars (tqdm)
+- Decord Video Loading (Fast & Deadlock-Free)
+- Vectorized v2 Transforms
 """
 
 import os
-import cv2
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
+
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-from torchvision import transforms
+from torchvision.transforms import v2  # Folosim v2 pentru transformari pe video
 import numpy as np
 import random
 import time
@@ -28,9 +30,15 @@ import sys
 import logging
 import json
 from pathlib import Path
-from sklearn.metrics import roc_auc_score, confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
+from sklearn.metrics import roc_auc_score
+
+# Inlocuim OpenCV cu Decord pentru citire nativa pe tensor mult mai rapida
+try:
+    import decord
+    decord.bridge.set_bridge('torch')
+except ImportError:
+    print("⚠️ decord not installed. Run: pip install decord")
+    sys.exit(1)
 
 # Optional: Weights & Biases
 try:
@@ -51,20 +59,32 @@ def parse_args():
     
     # Data
     parser.add_argument("--data_dir", type=str, default="dataset", help="Dataset root")
-    parser.add_argument("--dataset_type", type=str, default="hybrid", 
-                       choices=["faceforensics", "celebdf", "dfdc", "custom", "hybrid"],
-                       help="Dataset structure type")
+    parser.add_argument("--dataset_type", type=str, default="augmented",
+                        choices=["faceforensics", "celebdf", "dfdc", "custom", "hybrid", "augmented"],
+                        help="Dataset structure type. 'augmented' (default) combines Celeb-real/"
+                             "YouTube-real/Celeb-synthesis (the original Celeb-DF data) together "
+                             "with GenVideo-Real/GenVideo-Fake in one unified training run, so "
+                             "training from scratch here doesn't lose the Celeb-DF signal - it's "
+                             "included, just relearned together with GenVideo rather than resumed "
+                             "from an old checkpoint's weights.")
+    parser.add_argument("--workers", type=int, default=8,
+                        help="Num workers for DataLoader (0 for debugging). GPU sat at 0%% "
+                             "utilization with the old default of 4 - Decord video decoding is "
+                             "heavier per-sample than image loading, so it needs more parallel "
+                             "workers to keep the GPU fed. Raise further if nvidia-smi still shows "
+                             "0%% right after starting.")
     
     # Training
     parser.add_argument("--epochs", type=int, default=50, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size (lower for I3D)")
+    parser.add_argument("--num_frames", type=int, default=16,
+                        help="Frames per clip (16 is the standard for video deepfake detection)")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     
     # Advanced
     parser.add_argument("--mixup_alpha", type=float, default=0.2, help="Mixup alpha")
-    # Focal loss default True
     parser.add_argument("--no_focal_loss", action="store_true", help="Disable Focal Loss (Default: Enabled)")
     parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing")
     parser.add_argument("--use_wandb", action="store_true", help="Enable W&B logging")
@@ -92,14 +112,20 @@ def set_seed(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+    # Lasam benchmark pe True ulterior pentru modele fixate ca dimensiune
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
 class Config:
-    NUM_FRAMES = 32
+    NUM_FRAMES = 16
     IMG_SIZE = (224, 224)
     ACCUMULATION_STEPS = 4
     LABEL_SMOOTHING = 0.1
+
+# Max seconds to wait for a single batch from a DataLoader worker before treating it as
+# hung (see the timeout= usage below) - decord can hang (not raise) on some malformed
+# videos, and normal batches take ~1-2s, so anything past this is a stuck worker, not slowness.
+DATALOADER_TIMEOUT = 180
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=0.25, gamma=2.0):
@@ -136,50 +162,65 @@ def mixup_data(x, y, alpha=0.2):
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
 
-def extract_frames(video_path, num_frames=64, img_size=(224, 224), augment=False):
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened(): return None
-    
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if total <= 0: cap.release(); return None
-    
-    if augment and total >= num_frames:
-        start_idx = random.randint(0, max(0, total - num_frames - 1))
-        indices = list(range(start_idx, min(start_idx + num_frames, total)))
-        if len(indices) < num_frames:
-             indices = np.linspace(0, total - 1, num_frames, dtype=int)
-    else:
-        indices = np.linspace(0, total - 1, num_frames, dtype=int)
-    
-    frames = []
-    for idx in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
-        ret, frame = cap.read()
-        if ret:
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame)
-    cap.release()
-    
-    if not frames: return None
-    while len(frames) < num_frames: frames.append(frames[-1])
+def get_video_transforms(img_size, augment=False):
+    """Transformari v2 care opereaza direct pe batch-ul de cadre (T, C, H, W)"""
+    transform_list = [
+        v2.Resize(img_size, antialias=True),
+        v2.ToDtype(torch.float32, scale=True), # Converteste [0, 255] in [0.0, 1.0]
+        v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    ]
     
     if augment:
-        if random.random() > 0.5: frames = [cv2.flip(f, 1) for f in frames]
-        if random.random() > 0.7:
-             alpha = random.uniform(0.8, 1.2)
-             beta = random.randint(-10, 10)
-             frames = [cv2.convertScaleAbs(f, alpha=alpha, beta=beta) for f in frames]
+        aug_list = [
+            v2.RandomHorizontalFlip(p=0.5),
+            v2.ColorJitter(brightness=0.2, contrast=0.2)
+        ]
+        transform_list = aug_list + transform_list
+        
+    return v2.Compose(transform_list)
 
-    transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize(img_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]) 
-    ])
-    
+def extract_frames(video_path, num_frames=16, img_size=(224, 224), augment=False):
+    """Extract frames using Decord, mult mai rapid si sigur decat cv2"""
     try:
-        return torch.stack([transform(f) for f in frames], dim=1)
-    except: return None
+        # num_threads=1: decord defaults to num_threads=0 (auto/all-cores) *per VideoReader
+        # instance*. Under a multi-worker DataLoader, every worker process opens its own
+        # VideoReader, so with the default each of N worker processes independently tries to
+        # grab every CPU core for internal decode threads - N-way oversubscription that shows
+        # up as 100% CPU with WORSE throughput than fewer workers (observed: 8 workers ran
+        # slower than 4). Pinning each reader to 1 internal thread lets the DataLoader's
+        # worker-process-level parallelism be the actual source of parallelism instead.
+        vr = decord.VideoReader(str(video_path), ctx=decord.cpu(), num_threads=1)
+        total_frames = len(vr)
+        
+        if total_frames == 0:
+            print(f"\n❌ Video gol: {video_path}")
+            return None
+            
+        if augment and total_frames >= num_frames:
+            start_idx = random.randint(0, max(0, total_frames - num_frames - 1))
+            indices = np.linspace(start_idx, start_idx + num_frames - 1, num_frames, dtype=int)
+        else:
+            indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
+            
+        # Get batch direct. Forma: (T, H, W, C)
+        frames = vr.get_batch(indices)
+        
+        # Transformare pentru torchvision v2: (T, C, H, W)
+        frames = frames.permute(0, 3, 1, 2)
+        
+        # Aplicam transformarile (vectorizat pe intreg videoclipul)
+        transform = get_video_transforms(img_size, augment)
+        frames = transform(frames)
+        
+        # Modelele 3D asteapta input in format (C, T, H, W)
+        frames = frames.permute(1, 0, 2, 3)
+        
+        return frames
+
+    except Exception as e:
+        # Prinde orice eroare (codec lipsa, video corupt etc.)
+        print(f"\n❌ Eroare citire video {video_path} - Fallback activat. Eroare: {e}")
+        return None
 
 class DeepFakeDataset(Dataset):
     def __init__(self, root_dir, augment=False, dataset_type="hybrid"):
@@ -200,43 +241,59 @@ class DeepFakeDataset(Dataset):
         elif dataset_type == "custom":
              for lbl, cls in enumerate(["Real", "Fake"]):
                  p = root_path / cls
-                 if p.exists(): 
+                 if p.exists():
                      for v in p.glob("*.mp4"): self.samples.append((v, lbl))
+
+        elif dataset_type == "augmented":
+            for real_dir in ["Celeb-real", "YouTube-real", "GenVideo-Real"]:
+                path = root_path / real_dir
+                if path.exists():
+                    for v in path.glob("*.mp4"): self.samples.append((v, 0))
+
+            for fake_dir in ["Celeb-synthesis", "GenVideo-Fake"]:
+                path = root_path / fake_dir
+                if path.exists():
+                    for v in path.glob("*.mp4"): self.samples.append((v, 1))
 
         logging.info(f"Loaded {len(self.samples)} samples. Type: {dataset_type}")
 
     def __len__(self): return len(self.samples)
+    
     def __getitem__(self, idx):
         path, label = self.samples[idx]
         frames = extract_frames(path, Config.NUM_FRAMES, Config.IMG_SIZE, self.augment)
-        if frames is None: frames = torch.zeros((3, Config.NUM_FRAMES, *Config.IMG_SIZE), dtype=torch.float32)
+        
+        # FALLBACK LOOP: Daca videoclipul este corupt, tragem la sorti alt index din setul de date
+        # Astfel prevenim invatarea cu tensori goi si blocarea antrenamentului.
+        attempts = 0
+        while frames is None and attempts < 10:
+            idx = random.randint(0, len(self.samples) - 1)
+            path, label = self.samples[idx]
+            frames = extract_frames(path, Config.NUM_FRAMES, Config.IMG_SIZE, self.augment)
+            attempts += 1
+            
+        # Daca dupa 10 incercari tot pica (putin probabil, doar daca ai datele extrem de corupte), punem 0
+        if frames is None:
+            frames = torch.zeros((3, Config.NUM_FRAMES, *Config.IMG_SIZE), dtype=torch.float32)
+            
         return frames, label
     
     def get_labels(self):
         return [s[1] for s in self.samples]
 
-def make_weights_for_balanced_classes(dataset):
-    labels = np.array(dataset.get_labels())
-    classes, counts = np.unique(labels, return_counts=True)
-    weight_per_class = 1.0 / counts
-    weights = np.array([weight_per_class[label] for label in labels])
-    return torch.from_numpy(weights).double()
-
 def get_model(model_name="r3d_18", num_classes=2):
     logging.info(f"Building Model: {model_name}...")
     
     if model_name == "custom_i3d" or model_name == "i3d":
-        logging.warning("Using I3D model (custom or default) without pretrained weights! Training may be slow or fail on small datasets.")
         model = I3D(num_classes=num_classes)
         
     elif model_name == "r3d_18":
         from torchvision.models.video import r3d_18, R3D_18_Weights
         weights = R3D_18_Weights.KINETICS400_V1
         model = r3d_18(weights=weights)
-        # Replace head
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
-        logging.info("Loaded ResNet3D-18 with Kinetics-400 pretrained weights")
+        logging.info("Loaded ResNet3D-18 pretrained weights")
         
     elif model_name == "mc3_18":
         from torchvision.models.video import mc3_18, MC3_18_Weights
@@ -244,7 +301,7 @@ def get_model(model_name="r3d_18", num_classes=2):
         model = mc3_18(weights=weights)
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
-        logging.info("Loaded MC3-18 with Kinetics-400 pretrained weights")
+        logging.info("Loaded MC3-18 pretrained weights")
         
     elif model_name == "r2plus1d_18":
         from torchvision.models.video import r2plus1d_18, R2Plus1D_18_Weights
@@ -252,7 +309,7 @@ def get_model(model_name="r3d_18", num_classes=2):
         model = r2plus1d_18(weights=weights)
         in_features = model.fc.in_features
         model.fc = nn.Linear(in_features, num_classes)
-        logging.info("Loaded R2+1D-18 with Kinetics-400 pretrained weights")
+        logging.info("Loaded R2+1D-18 pretrained weights")
         
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -327,7 +384,14 @@ def main():
     args = parse_args()
     setup_logging(args.output_dir)
     set_seed(args.seed)
+
+    Config.NUM_FRAMES = args.num_frames
     
+    # Optimizare CuDNN pt modele cu input fix 
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    logging.info(f"Frames per clip: {Config.NUM_FRAMES} | cuDNN benchmark: ON")
+
     args.use_amp = torch.cuda.is_available()
 
     if args.use_wandb and WANDB_AVAILABLE:
@@ -341,13 +405,11 @@ def main():
         logging.error("Dataset empty!")
         sys.exit(1)
 
-    # Split indices first
     train_len = int(0.8 * len(full_ds))
     val_len = len(full_ds) - train_len
     generator = torch.Generator().manual_seed(args.seed)
     train_ds_subset, val_ds_subset = torch.utils.data.random_split(full_ds, [train_len, val_len], generator=generator)
     
-    # Create separate datasets to allow different augmentation
     import copy
     train_ds = copy.deepcopy(full_ds)
     val_ds = copy.deepcopy(full_ds)
@@ -355,22 +417,14 @@ def main():
     train_ds.augment = True
     val_ds.augment = False
     
-    # Re-wrap in subset logic using the INDICES from random_split
-    # We need to access samples by index from the split
-    # Better way: Subsets hold indices. We just point them to the new datasets.
     train_ds = torch.utils.data.Subset(train_ds, train_ds_subset.indices)
     val_ds = torch.utils.data.Subset(val_ds, val_ds_subset.indices)
     
-    # --- WEIGHTED SAMPLER LOGIC ---
     logging.info("Calculating class weights for balanced sampling...")
-    # Extract training indices
     train_indices = train_ds.indices
-    # Get all labels from the main dataset
     all_labels = np.array(full_ds.get_labels())
-    # Filter labels for only training data
     train_labels = all_labels[train_indices]
     
-    # Calculate weights
     classes, counts = np.unique(train_labels, return_counts=True)
     logging.info(f"Distribution: {dict(zip(classes, counts))}")
     
@@ -379,14 +433,20 @@ def main():
     sample_weights = torch.from_numpy(sample_weights).double()
     
     sampler = WeightedRandomSampler(sample_weights, len(sample_weights)) # type: ignore
-    logging.info("WeightedRandomSampler detached")
-    
-    # Windows supports workers if protected by if __name__ == "__main__"
-    num_workers = 4 
-    
-    # Sampler replaces shuffle=True
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+
+    # Acum luam num_workers din argparse (--workers).
+    # Seteaza la 0 in terminal (--workers 0) daca vrei sa faci debugging curat.
+    # timeout=DATALOADER_TIMEOUT: daca un fisier scapa nedetectat de clean.dataset.py si decord
+    # se blocheaza la citire (nu arunca exceptie, pur si simplu nu mai raspunde), fara timeout
+    # DataLoader-ul astepta la infinit - exact ce s-a intamplat la Validation. Cu workers
+    # persistenti (persistent_workers=True) acelasi worker ramane blocat si la epocile
+    # urmatoare, deci fara asta antrenarea s-ar bloca din nou in acelasi loc de fiecare data.
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
+                              num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0),
+                              timeout=DATALOADER_TIMEOUT if args.workers > 0 else 0)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.workers, pin_memory=True, persistent_workers=(args.workers > 0),
+                            timeout=DATALOADER_TIMEOUT if args.workers > 0 else 0)
     
     model = get_model(model_name=args.model, num_classes=2).to(device)
     
@@ -412,9 +472,34 @@ def main():
     logging.info("Starting I3D Training...")
     
     for epoch in range(start_epoch, args.epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device, args)
-        val_loss, val_acc, val_auc = validate(model, val_loader, criterion, device)
-        
+        try:
+            train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, scaler, device, args)
+            val_loss, val_acc, val_auc = validate(model, val_loader, criterion, device)
+        except RuntimeError as e:
+            msg = str(e)
+            if "DataLoader worker" in msg or "timed out" in msg.lower():
+                # A worker didn't return a batch within DATALOADER_TIMEOUT - almost certainly a
+                # video decord hangs on outright (rather than a clean, catchable corruption error,
+                # which clean.dataset.py would already have quarantined). Save what was already
+                # trained this epoch before exiting so a re-run doesn't lose ~an epoch's work.
+                emergency_path = Path(args.output_dir) / f"emergency_epoch{epoch+1}_{args.model}.pth"
+                torch.save({
+                    'epoch': epoch,
+                    'model': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'best_auc': best_auc
+                }, emergency_path)
+                logging.error(
+                    f"A DataLoader worker didn't return a batch within {DATALOADER_TIMEOUT}s during "
+                    f"epoch {epoch+1} - a specific video is hanging decord, not raising a catchable "
+                    f"error (clean.dataset.py would already have quarantined a clean-erroring file). "
+                    f"Saved progress to {emergency_path}. Re-run clean.dataset.py (it now also checks "
+                    f"the last frame of every clip, not just the first) to find and quarantine it, "
+                    f"then resume with --checkpoint {emergency_path}"
+                )
+                sys.exit(1)
+            raise
+
         scheduler.step()
         
         logging.info(f"Epoch {epoch+1} | Train Loss: {train_loss:.4f} Acc: {train_acc:.2f}% | Val Loss: {val_loss:.4f} Acc: {val_acc:.2f}% AUC: {val_auc:.4f}")
@@ -424,13 +509,20 @@ def main():
             
         if val_auc > best_auc:
             best_auc = val_auc
-            torch.save({
+            checkpoint = {
                 'epoch': epoch,
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'best_auc': best_auc
-            }, Path(args.output_dir) / "best_i3d.pth")
-            logging.info(f"Saved Best I3D (AUC: {best_auc:.4f} | Acc: {val_acc:.2f}%)")
+            }
+            torch.save(checkpoint, Path(args.output_dir) / f"best_{args.model}.pth")
+            if args.model == "r3d_18":
+                # agents/video/api.py hardcodes MODEL_PATH="models_i3d/best_i3d.pth" and always
+                # builds an r3d_18 architecture to load it into - without this, a freshly
+                # retrained r3d_18 checkpoint would sit in best_r3d_18.pth and never actually
+                # get served, silently leaving the old checkpoint in production.
+                torch.save(checkpoint, Path(args.output_dir) / "best_i3d.pth")
+            logging.info(f"Saved Best Model (AUC: {best_auc:.4f} | Acc: {val_acc:.2f}%)")
 
 if __name__ == "__main__":
     main()

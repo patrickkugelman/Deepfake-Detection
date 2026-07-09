@@ -180,7 +180,12 @@ def load_model_background() -> None:
                     logger.warning("⚠️ Architecture mismatch detected!")
                     logger.warning(f"   Missing keys: {len(missing_keys)}")
                     logger.warning(f"   Unexpected keys: {len(unexpected_keys)}")
-                    logger.warning("⚠️ Using base model without custom weights (heuristic mode)")
+                    logger.warning("⚠️ Discarding base model — falling back to heuristic mode")
+                    # IMPORTANT: without this, `model` stayed set to the base (untrained)
+                    # architecture, so /analyze kept running inference through it and
+                    # reported "mode": "neural" at /health — the real heuristic fallback
+                    # below never actually executed.
+                    model = None
                 else:
                     # Perfect match - load weights
                     model.load_state_dict(state_dict, strict=True)
@@ -188,17 +193,19 @@ def load_model_background() -> None:
                     
             except Exception as e:
                 logger.error(f"❌ Failed to load weights: {e}")
-                logger.warning("⚠️ Continuing with base model (untrained)")
+                logger.warning("⚠️ Discarding base model — falling back to heuristic mode")
+                model = None
         else:
             logger.warning(f"⚠️ No weights found at {MODEL_PATH}")
-            logger.warning("⚠️ Running in heuristic/untrained mode")
+            logger.warning("⚠️ Discarding base model (untrained classification head) — falling back to heuristic mode")
+            model = None
         
         # Step 4: Set to eval mode
         if model is not None:
             model.eval()
             logger.info("✅ Audio model ready for inference")
         else:
-            logger.error("❌ Model initialization failed completely")
+            logger.info("ℹ️ No trained weights available — /analyze will use heuristic_audio_analysis()")
             
     except Exception as e:
         logger.error(f"❌ Critical model loading error: {e}")
@@ -327,8 +334,10 @@ async def analyze(file: UploadFile = File(...)) -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"❌ Failed to load audio: {e}")
             return {
-                "verdict": "Real",
+                "status": "ERROR",
+                "verdict": "INCONCLUSIVE_TECHNICAL",
                 "fake_probability": 0.0,
+                "confidence": 0.0,
                 "details": f"Audio loading error: {str(e)}",
                 "error": str(e)[:200]
             }
@@ -397,12 +406,14 @@ async def analyze(file: UploadFile = File(...)) -> Dict[str, Any]:
         logger.error(traceback.format_exc())
         
         return {
-            "verdict": "Real",
+            "status": "ERROR",
+            "verdict": "INCONCLUSIVE_TECHNICAL",
             "fake_probability": 0.0,
+            "confidence": 0.0,
             "details": f"Analysis error: {str(e)[:100]}",
             "error": str(e)[:200]
         }
-    
+
     finally:
         # Cleanup temp file
         if os.path.exists(temp_path):

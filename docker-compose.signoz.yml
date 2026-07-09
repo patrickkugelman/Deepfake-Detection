@@ -1,6 +1,6 @@
 # ============================================================================
-# SigNoz Self-Hosted Observability Stack
-# Echivalent Python al ghidului Java/Maven de la firmă
+# SigNoz Self-Hosted Observability Stack (v0.115+)
+# Based on official SigNoz docker-compose setup
 #
 # Pornire:
 #   docker compose -f docker-compose.signoz.yml up -d
@@ -9,11 +9,11 @@
 # ============================================================================
 
 services:
-  # ── ClickHouse (storage backend pentru SigNoz) ────────────────────────────
+  # ── ClickHouse (storage backend) ───────────────────────────────────────────
   signoz-clickhouse:
-    image: clickhouse/clickhouse-server:24.8-alpine
+    image: clickhouse/clickhouse-server:25.6-alpine
     container_name: signoz_clickhouse
-    hostname: signoz-clickhouse
+    hostname: clickhouse
     volumes:
       - signoz_clickhouse_data:/var/lib/clickhouse
       - ./signoz-config/clickhouse-config.xml:/etc/clickhouse-server/config.d/config.xml:ro
@@ -32,13 +32,13 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── Schema Migrator (creaza tabelele ClickHouse, ruleaza o singura data) ──
+  # ── Schema Migrator (runs once to create ClickHouse tables) ────────────────
   signoz-schema-migrator:
     image: signoz/signoz-schema-migrator:latest
     container_name: signoz_schema_migrator
     command:
       - "sync"
-      - "--dsn=tcp://signoz-clickhouse:9000"
+      - "--dsn=tcp://clickhouse:9000"
       - "--dev"
     depends_on:
       signoz-clickhouse:
@@ -47,45 +47,28 @@ services:
       - deepguard_net
     restart: on-failure
 
-  # ── SigNoz OTEL Collector (primeste date de la otel-collector principal) ──
-  signoz-otelcol:
-    image: signoz/signoz-otel-collector:latest
-    container_name: signoz_otelcol
-    hostname: signoz-otelcol
-    command: ["--config=/etc/otelcol-config.yml"]
+  # ── SigNoz Server (unified: API + Frontend UI) ────────────────────────────
+  signoz:
+    image: signoz/signoz:latest
+    container_name: signoz_server
+    hostname: signoz
     volumes:
-      - ./signoz-config/otelcol-config.yml:/etc/otelcol-config.yml:ro
-    depends_on:
-      signoz-clickhouse:
-        condition: service_healthy
-      signoz-schema-migrator:
-        condition: service_completed_successfully
-    networks:
-      - deepguard_net
-    restart: unless-stopped
-
-  # ── SigNoz Query Service (API backend) ────────────────────────────────────
-  signoz-query-service:
-    image: signoz/query-service:latest
-    container_name: signoz_query_service
-    hostname: query-service
-    volumes:
-      - ./signoz-config/prometheus.yml:/root/config/prometheus.yml:ro
       - signoz_sqlite:/var/lib/signoz
     environment:
-      - ClickHouseUrl=tcp://signoz-clickhouse:9000
-      - STORAGE=clickhouse
+      - SIGNOZ_TELEMETRYSTORE_CLICKHOUSE_DSN=tcp://clickhouse:9000
+      - SIGNOZ_SQLSTORE_SQLITE_PATH=/var/lib/signoz/signoz.db
+      - SIGNOZ_ALERTMANAGER_PROVIDER=signoz
+      - SIGNOZ_TOKENIZER_JWT_SECRET=deepguard-signoz-jwt-secret-2025
       - GODEBUG=netdns=go
-      - TELEMETRY_ENABLED=false
+      - SIGNOZ_TELEMETRY_ENABLED=false
       - DEPLOYMENT_TYPE=docker-standalone-amd
-      - SIGNOZ_LOCAL_DB_PATH=/var/lib/signoz/signoz.db
     depends_on:
       signoz-clickhouse:
         condition: service_healthy
       signoz-schema-migrator:
         condition: service_completed_successfully
     ports:
-      - "8090:8080"    # API SigNoz (8080 poate fi ocupat — mapam pe 8090)
+      - "3301:8080"
     networks:
       - deepguard_net
     restart: unless-stopped
@@ -96,18 +79,21 @@ services:
       retries: 5
       start_period: 60s
 
-  # ── SigNoz Frontend (UI la http://localhost:3301) ─────────────────────────
-  signoz-frontend:
-    image: signoz/frontend:latest
-    container_name: signoz_frontend
-    hostname: signoz-frontend
+  # ── SigNoz OTEL Collector (receives traces from DeepGuard) ────────────────
+  signoz-otelcol:
+    image: signoz/signoz-otel-collector:latest
+    container_name: signoz_otelcol
+    hostname: signoz-otelcol
+    command: ["--config=/etc/otelcol-config.yml"]
+    volumes:
+      - ./signoz-config/otelcol-config.yml:/etc/otelcol-config.yml:ro
     environment:
-      - FRONTEND_API_ENDPOINT=http://query-service:8080
+      - SIGNOZ_OTEL_COLLECTOR_CLICKHOUSE_DSN=tcp://clickhouse:9000
     depends_on:
-      signoz-query-service:
+      signoz-clickhouse:
         condition: service_healthy
-    ports:
-      - "3301:3301"
+      signoz-schema-migrator:
+        condition: service_completed_successfully
     networks:
       - deepguard_net
     restart: unless-stopped

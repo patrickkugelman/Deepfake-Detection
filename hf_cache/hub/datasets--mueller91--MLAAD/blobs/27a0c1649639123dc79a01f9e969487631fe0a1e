@@ -1,0 +1,128 @@
+---
+license: cc-by-nc-4.0
+language:
+- en
+- de
+- fr
+- es
+- uk
+- pl
+- ru
+- it
+task_categories:
+- audio-classification
+tags:
+- audio
+- deepfake
+- audio-deepfake-detection
+- anti-spoofing
+- voice
+- voice-antispoofing
+- MLAAD
+pretty_name: 'MLAAD: The Multi-Language Audio Anti-Spoofing Dataset'
+size_categories:
+- 100K<n<1M
+---
+
+
+
+<p align="center" style="width: 50%">
+  <img src="https://cdn-uploads.huggingface.co/production/uploads/651bba9c00137407015e0bdf/DDRTGPCGGr-d0rQ_M-GwG.png" />
+</p>
+
+# Introduction
+Welcome to MLAAD: The Multi-Language Audio Anti-Spoofing Dataset -- a dataset to train, test and evaluate audio deepfake detection. See
+[the paper](https://arxiv.org/pdf/2401.09512.pdf) for more information.
+
+# License
+MLAAD is published strictly for non-commercial academic research use, under the CC-BY-NC 4.0 license. Commercial use is not permitted.
+
+# Download the dataset
+#### Option 1: Hugging Face datasets library
+
+Install the datasets package:
+```bash
+pip install datasets
+```
+
+Login with your Hugging Face account:
+```bash
+huggingface-cli login
+```
+
+Then load the dataset in Python:
+```python
+from datasets import load_dataset
+
+# Download from HF and cache
+ds = load_dataset("mueller91/MLAAD")
+
+# Optionally: Save the dataset to your own directory
+ds.save_to_disk("MLAAD_local")
+```
+
+This will automatically handle authentication and download.
+
+#### Option 2: Git + git-lfs
+
+If you prefer to clone with git, you must first login via Hugging Face:
+```bash
+huggingface-cli login
+```
+
+Then clone:
+```bash
+git lfs install
+git clone https://huggingface.co/datasets/mueller91/MLAAD
+```
+
+
+# Structure
+The dataset is based on the [M-AILABS](https://github.com/imdatceleste/m-ailabs-dataset) dataset.
+MLAAD is structured as follows:
+
+```
+fake
+|-language_1
+|-language_2
+|- ....
+|- language_K
+    | - model_1_K
+    | - model_2_K
+    | - ....
+    | - model_L_K
+        | - meta.csv
+        | - audio_L_K_1.wav
+        | - audio_L_K_2.wav
+        | - audio_L_K_3.wav
+        | - ....
+        | - audio_L_K_1000.wav
+```
+        
+
+The file 'meta.csv' contains the following identifiers. For more in these, please see the [paper](https://arxiv.org/pdf/2401.09512) and [our website](https://deepfake-total.com/mlaad).
+```
+path|original_file|language|is_original_language|duration|training_data|model_name|architecture|transcript|reference_speaker
+```
+where `reference_speaker` may or not be present - this key has been introduced only in v8.
+
+
+# Proposed Usage 
+We suggest to use MLAAD either as new out-of-domain test data for existing anti-spoofing models, or as additional training resource.
+We urge to complement the fake audios in MLAAD with the corresponding authentic ones from M-AILABS, in order to obtain a balanced dataset.
+M-AILABS can be downloaded [here](https://github.com/imdatceleste/m-ailabs-dataset). 
+An antispoofing model trained on (among others) the MLAAD dataset is available [here](https://deepfake-total.com/).
+
+# Bibtex 
+```
+@article{muller2024mlaad,
+  title={MLAAD: The Multi-Language Audio Anti-Spoofing Dataset},
+  author={M{\"u}ller, Nicolas M and Kawa, Piotr and Choong, Wei Herng and Casanova, Edresson and G{\"o}lge, Eren and M{\"u}ller, Thorsten and Syga, Piotr and Sperl, Philip and B{\"o}ttinger, Konstantin},
+  journal={arXiv preprint arXiv:2401.09512},
+  year={2024}
+}
+```
+
+# Contact Emails
+- nicolas.mueller@aisec.fraunhofer.de
+- piotr.kawa@pwr.edu.pl

@@ -25,7 +25,7 @@ exporters:
 
   # SigNoz Self-Hosted (local Docker) — principal
   otlp/signoz-local:
-    endpoint: signoz_otelcol:4317
+    endpoint: signoz-otelcol:4317
     tls:
       insecure: true
     sending_queue:
@@ -38,19 +38,6 @@ exporters:
       max_interval: 30s
       max_elapsed_time: 120s
 
-  # SigNoz Cloud (backup) — activat dacă SIGNOZ_INGESTION_KEY e setat în .env
-  otlp/signoz-cloud:
-    endpoint: ${env:SIGNOZ_ENDPOINT}
-    headers:
-      signoz-ingestion-key: ${env:SIGNOZ_INGESTION_KEY}
-    tls:
-      insecure: false
-    sending_queue:
-      enabled: true
-      num_consumers: 2
-      queue_size: 50
-    retry_on_failure:
-      enabled: true
 
   # Prometheus metrics scrape endpoint (:8889/metrics)
   prometheus:
@@ -76,7 +63,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug, prometheus]
+      exporters: [debug, prometheus, otlp/signoz-local]
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]

@@ -13,7 +13,7 @@ logger = logging.getLogger("DeepGuard.AgenticRouter")
 
 # Fallback when LLM is unavailable or returns invalid response
 FALLBACK_VIDEO = ["video", "bio"]
-FALLBACK_IMAGE = ["vision"]
+FALLBACK_IMAGE = ["vision", "bio"]
 FALLBACK_AUDIO = ["audio"]
 FALLBACK_TEXT = ["text"]
 
@@ -173,7 +173,7 @@ File: filename="{filename}", file_type="{file_type}"{query_line}
 Available agents (candidates) that support this file type:
 {tools_text}
 
-We have 4 trained agents: vision (images), video (temporal video), audio (voice), text (text). Bio is for liveness on video. Choose from the candidates above the agents that make sense for this file. You may select one or more.
+We have 4 trained agents: vision (images), video (temporal video), audio (voice), text (text). Bio does rPPG pulse + liveness on video, and a separate skin-tone/texture/symmetry biological-plausibility check on still images (no pulse on images - a single frame carries no temporal signal). Choose from the candidates above the agents that make sense for this file. You may select one or more.
 
 Respond ONLY with valid JSON in this exact format (no markdown, no extra text):
 {{"agents": ["name1", "name2"], "reasoning": "brief explanation"}}

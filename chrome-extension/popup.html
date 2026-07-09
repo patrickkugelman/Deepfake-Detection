@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DeepGuard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 340px;
+      min-height: 200px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d0d0d;
+      color: #e5e5e5;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #7c3aed, #4f46e5);
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header h1 { font-size: 16px; font-weight: 700; color: #fff; }
+    .header .logo { font-size: 22px; }
+
+    .body { padding: 16px 20px; }
+
+    /* Login view */
+    .login-section label {
+      display: block;
+      font-size: 11px;
+      color: #9ca3af;
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .login-section input {
+      width: 100%;
+      padding: 8px 10px;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e5e5e5;
+      font-size: 13px;
+      margin-bottom: 10px;
+      outline: none;
+    }
+    .login-section input:focus { border-color: #7c3aed; }
+
+    /* Buttons */
+    .btn {
+      width: 100%;
+      padding: 9px;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #7c3aed; color: #fff; }
+    .btn-secondary { background: #1f1f1f; color: #9ca3af; border: 1px solid #333; margin-top: 6px; }
+    .btn-danger { background: #991b1b; color: #fff; margin-top: 6px; }
+
+    /* Account view */
+    .account-section .plan-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      background: #7c3aed22;
+      color: #a78bfa;
+      border: 1px solid #7c3aed44;
+    }
+    .account-section .usage-bar-wrap {
+      background: #1a1a1a;
+      border-radius: 4px;
+      height: 6px;
+      margin: 8px 0 4px;
+      overflow: hidden;
+    }
+    .account-section .usage-bar {
+      height: 100%;
+      background: #7c3aed;
+      border-radius: 4px;
+      transition: width 0.3s;
+    }
+    .account-section .usage-text {
+      font-size: 11px;
+      color: #6b7280;
+    }
+
+    .url-section { margin-top: 14px; }
+    .url-section label { font-size: 11px; color: #9ca3af; display: block; margin-bottom: 4px; }
+    .url-row { display: flex; gap: 6px; }
+    .url-row input {
+      flex: 1;
+      padding: 8px 10px;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e5e5e5;
+      font-size: 12px;
+      outline: none;
+    }
+    .url-row input:focus { border-color: #7c3aed; }
+    .url-row button {
+      padding: 8px 12px;
+      background: #7c3aed;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .url-row button:hover { background: #6d28d9; }
+
+    /* Result card */
+    .result-card {
+      margin-top: 14px;
+      background: #1a1a1a;
+      border-radius: 8px;
+      padding: 12px 14px;
+      border-left: 4px solid #7c3aed;
+    }
+    .result-card.fake { border-color: #ef4444; }
+    .result-card.real { border-color: #22c55e; }
+    .result-card.suspicious { border-color: #f59e0b; }
+
+    .result-card .verdict-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+    .result-card .verdict-label {
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: 1px;
+    }
+    .result-card .confidence {
+      font-size: 12px;
+      color: #9ca3af;
+    }
+    .result-card .reasoning {
+      font-size: 12px;
+      color: #9ca3af;
+      line-height: 1.5;
+      max-height: 60px;
+      overflow: hidden;
+    }
+
+    /* Analyzing spinner */
+    .analyzing-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+    }
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid #7c3aed44;
+      border-top-color: #7c3aed;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .error-text { color: #ef4444; font-size: 12px; margin-top: 8px; }
+    .hint { font-size: 11px; color: #6b7280; margin-top: 10px; text-align: center; line-height: 1.4; }
+
+    .divider { border: none; border-top: 1px solid #1f1f1f; margin: 12px 0; }
+
+    #view-login, #view-account { display: none; }
+    #view-login.active, #view-account.active { display: block; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="logo">🛡️</span>
+    <h1>DeepGuard</h1>
+  </div>
+
+  <div class="body">
+
+    <!-- LOGIN VIEW -->
+    <div id="view-login">
+      <div class="login-section">
+        <label>API Key</label>
+        <input type="password" id="apiKeyInput" placeholder="sk_live_..." autocomplete="off" />
+        <button class="btn btn-primary" id="saveKeyBtn">Connect</button>
+        <p class="hint">
+          Get your API key at <strong>deepguard.pro</strong> → Account → API Keys
+        </p>
+      </div>
+    </div>
+
+    <!-- ACCOUNT VIEW -->
+    <div id="view-account">
+      <div class="account-section">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <span id="usernameLabel" style="font-size:13px; font-weight:600;"></span>
+          <span class="plan-badge" id="planBadge">free</span>
+        </div>
+        <div class="usage-bar-wrap">
+          <div class="usage-bar" id="usageBar" style="width:0%"></div>
+        </div>
+        <div class="usage-text" id="usageText">Loading usage...</div>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="url-section">
+        <label>Analyze a URL manually</label>
+        <div class="url-row">
+          <input type="url" id="urlInput" placeholder="https://..." />
+          <button id="analyzeBtn">Analyze</button>
+        </div>
+      </div>
+
+      <div id="analyzingRow" class="analyzing-row" style="display:none;">
+        <div class="spinner"></div>
+        <span style="font-size:12px; color:#9ca3af;">Analyzing... this takes ~20s</span>
+      </div>
+
+      <div id="resultCard" class="result-card" style="display:none;">
+        <div class="verdict-row">
+          <span id="verdictEmoji" style="font-size:18px;"></span>
+          <span id="verdictLabel" class="verdict-label"></span>
+          <span id="confidenceLabel" class="confidence"></span>
+        </div>
+        <div id="reasoningText" class="reasoning"></div>
+      </div>
+
+      <div id="errorText" class="error-text" style="display:none;"></div>
+
+      <button class="btn btn-danger" id="logoutBtn" style="margin-top:14px;">Disconnect</button>
+
+      <p class="hint">Right-click any image or video → "Verify with DeepGuard"</p>
+    </div>
+
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

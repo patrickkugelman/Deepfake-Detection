@@ -10,9 +10,10 @@ import time
 DTRACK_URL = "http://127.0.0.1:8081"
 USERNAME = "admin"
 PASSWORD = "DeepGuard2025!"
+API_KEY = "odt_zFCt6uUo_FJ6rNSENnPdpX79Sj3O0NTrlHiQz25CP"  # direct API key
 PROJECT_NAME = "DeepGuard Pro"
 PROJECT_VERSION = "1.0.0"
-SBOM_FILE = "sbom.json"
+SBOM_FILE = "sbom_frozen.json"
 
 def login():
     r = requests.post(f"{DTRACK_URL}/api/v1/user/login",
@@ -143,17 +144,14 @@ def get_summary(api_key, project_name, version):
                 print(f"  {vid:<22} {severity:<10} {pkg}")
 
 if __name__ == "__main__":
-    print("\n[1] Logging in...")
-    token = login()
+    print("\n[1] Using API key directly...")
+    api_key = API_KEY
 
-    print("[2] Getting API key...")
-    api_key = get_or_create_api_key(token)
-
-    print("[3] Uploading SBOM...")
+    print("[2] Uploading SBOM...")
     bom_token = upload_sbom(api_key)
 
-    print("[4] Waiting for analysis...")
+    print("[3] Waiting for analysis...")
     wait_for_processing(api_key, bom_token)
 
-    print("[5] Fetching results...")
+    print("[4] Fetching results...")
     get_summary(api_key, PROJECT_NAME, PROJECT_VERSION)

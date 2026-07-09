@@ -36,6 +36,44 @@ api.interceptors.request.use((config) => {
     return config;
 });
 
+// Response Interceptor — centralizes 401/429/500 handling so callers don't each
+// have to guess what an AxiosError means. Previously there was no response
+// interceptor at all: every call site handled (or silently swallowed) errors
+// differently, and AuthContext treated ANY getMe() failure — including a
+// transient 429 or network blip — as "token invalid" and force-logged the user out.
+api.interceptors.response.use(
+    (response) => response,
+    (error: AxiosError) => {
+        const status = error.response?.status;
+
+        if (status === 401) {
+            (error as AxiosError & { isAuthError?: boolean }).isAuthError = true;
+            // Only the token-holder actually had a session to lose — avoid redirect
+            // loops if this fires while already on a public page.
+            const publicPaths = ['/login', '/register'];
+            if (localStorage.getItem('token') && !publicPaths.includes(window.location.pathname)) {
+                localStorage.removeItem('token');
+                window.location.href = '/login?expired=1';
+            }
+        } else if (status === 429) {
+            const retryAfter = Number(error.response?.headers?.['retry-after']) || undefined;
+            (error as AxiosError & { isRateLimited?: boolean; retryAfter?: number }).isRateLimited = true;
+            (error as AxiosError & { isRateLimited?: boolean; retryAfter?: number }).retryAfter = retryAfter;
+            (error as AxiosError & { friendlyMessage?: string }).friendlyMessage = retryAfter
+                ? `Prea multe cereri — încearcă din nou în ${retryAfter}s.`
+                : 'Prea multe cereri — încearcă din nou în câteva secunde.';
+        } else if (status && status >= 500) {
+            (error as AxiosError & { friendlyMessage?: string }).friendlyMessage =
+                'Serverul a întâmpinat o eroare. Încearcă din nou în câteva momente.';
+        } else if (!status) {
+            (error as AxiosError & { friendlyMessage?: string }).friendlyMessage =
+                'Nu am putut contacta serverul — verifică conexiunea la internet.';
+        }
+
+        return Promise.reject(error);
+    }
+);
+
 // ============================================================================
 // TYPES & INTERFACES
 // ============================================================================
@@ -292,16 +330,21 @@ export interface ChatMessageResponse {
 }
 
 /**
- * Send a chat message about an EXISTING job
+ * Send a chat message about an EXISTING job.
+ * `history` is the prior turns of this conversation ({role, content} pairs) — without
+ * it, the backend answers each message in total isolation with no memory of what was
+ * asked/answered before.
  */
 export const sendChatMessage = async (
     jobId: string,
     message: string,
-    token: string
+    token: string,
+    history?: Array<{ role: string; content: string }>
 ): Promise<ChatMessageResponse> => {
     const response = await api.post<ChatMessageResponse>('/chat/message', {
         job_id: jobId,
-        message: message
+        message: message,
+        history: history || []
     }, {
         headers: { Authorization: `Bearer ${token}` }
     });
@@ -362,13 +405,14 @@ export const getSystemStats = async (token: string): Promise<SystemStats> => {
 };
 
 /**
- * Get chat history
+ * Get stored chat history for a job (persisted server-side so it survives a reload)
  */
-export const getChatHistory = async (token: string) => {
+export const getChatHistory = async (jobId: string, token: string) => {
     const response = await api.get('/chat/history', {
+        params: { job_id: jobId },
         headers: { Authorization: `Bearer ${token}` }
     });
-    return response.data;
+    return response.data as { messages: Array<{ role: string; content: string; ts?: string }> };
 };
 
 // ============================================================================

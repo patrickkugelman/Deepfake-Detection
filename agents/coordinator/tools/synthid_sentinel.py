@@ -67,23 +67,19 @@ class SynthIDSentinel:
                 return result
 
             print(f"🔍 [SynthID] Scanning {file_path}...")
-            
-            # --- SIMULATION ---
-            # In a real environment with credentials, we would call:
-            # image = Image.load_from_file(file_path)
-            # watermark = vertexai.preview.vision_models.WatermarkEvents.detect(image=image)
-            
-            import random
-            is_suspicious = "gen" in file_path.lower() or "synth" in file_path.lower()
-            
-            if is_suspicious:
-                result["detected"] = True
-                result["confidence"] = 0.99
-                result["metadata"]["status"] = "success"
-                result["metadata"]["version"] = "1.0"
-            else:
-                result["metadata"]["status"] = "clean"
-            
+
+            # NOT IMPLEMENTED: this used to "detect" a watermark by checking whether the
+            # word "gen"/"synth" appeared in the file path — a filename heuristic, not a
+            # real check of the file's content. It was wired as a ground-truth override
+            # in neurosymbolic.py (FAKE @ 99% confidence), so a filename like
+            # "generation_test.jpg" or a real photo named "synthwave_party.jpg" could
+            # both trigger a false certainty in either direction. Real Google SynthID
+            # watermark verification is not available through a public API today, so
+            # this now honestly reports "not_implemented" instead of fabricating a
+            # result. Re-enable only once backed by an actual watermark-detection call
+            # (see the commented Vertex AI call above).
+            result["metadata"]["status"] = "not_implemented"
+
         except Exception as e:
             print(f"❌ [SynthID] Scan failed: {e}")
             result["metadata"]["status"] = "error"

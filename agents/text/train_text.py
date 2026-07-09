@@ -7,7 +7,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-from transformers import RobertaTokenizer, RobertaForSequenceClassification, AdamW, get_linear_schedule_with_warmup
+from transformers import RobertaTokenizer, RobertaForSequenceClassification, get_linear_schedule_with_warmup
+from torch.optim import AdamW
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 import numpy as np
@@ -198,7 +199,7 @@ def train_text_agent():
     model = RobertaForSequenceClassification.from_pretrained('roberta-base', num_labels=2)
     model = model.to(device) # type: ignore
     
-    optimizer = AdamW(model.parameters(), lr=args.lr, correct_bias=False)
+    optimizer = AdamW(model.parameters(), lr=args.lr)  # torch.optim.AdamW has no correct_bias kwarg (that was transformers-specific)
     total_steps = len(train_loader) * args.epochs
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
     loss_fn = nn.CrossEntropyLoss().to(device)

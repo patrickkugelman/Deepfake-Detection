@@ -423,7 +423,7 @@ async def analyze(file: UploadFile = File(...)) -> Dict[str, Any]:
                     handles.append(target_layer.register_full_backward_hook(bwd_hook))
 
                 # Re-run forward cu gradienți activați
-                tensor_grad = transform(image).unsqueeze(0)
+                tensor_grad = transform(image).unsqueeze(0) # type: ignore
                 tensor_grad.requires_grad_(True)
                 out2 = model(tensor_grad)
                 logits2 = out2[0] if isinstance(out2, tuple) else out2
@@ -489,6 +489,10 @@ async def analyze(file: UploadFile = File(...)) -> Dict[str, Any]:
                 with open(heatmap_path, "rb") as f:
                     heatmap_b64 = "data:image/jpeg;base64," + base64.b64encode(f.read()).decode("utf-8")
 
+                # Encode imaginea originală pentru slider-ul before/after din UI
+                _, orig_buf = cv2.imencode('.jpg', image_bgr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                orig_b64 = "data:image/jpeg;base64," + base64.b64encode(orig_buf.tobytes()).decode("utf-8")
+
                 logger.info(f"🎨 Grad-CAM saved: {heatmap_path} (layer_found={grad_cam_generated})")
 
                 evidence = [{
@@ -502,6 +506,7 @@ async def analyze(file: UploadFile = File(...)) -> Dict[str, Any]:
                     ),
                     "url": f"/evidence/{heatmap_filename}",
                     "base64_image": heatmap_b64,
+                    "original_base64": orig_b64,
                     "confidence": fake_prob,
                     "method": "Grad-CAM" if grad_cam_generated and 'value' in activations_store else "Gradient-Input Fallback"
                 }]

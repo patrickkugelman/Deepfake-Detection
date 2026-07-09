@@ -39,7 +39,14 @@ AGENT_WEIGHTS: Dict[str, float] = {
     "text":          float(os.getenv("WEIGHT_TEXT_AGENT",         "0.8")),
     "fingerprint":   float(os.getenv("WEIGHT_FINGERPRINT_AGENT",  "1.1")),
 }
-logger.info(f"Agent weights: {AGENT_WEIGHTS}")
+# bio's 1.2x weight above is calibrated for its rPPG pulse signal (video), which is a
+# strong, well-validated biological measurement. On still images bio instead reports a
+# much softer skin-tone/texture/symmetry plausibility heuristic (no temporal signal
+# exists in a single frame, so no pulse) - giving that the same weight as validated
+# pulse detection would let an unvalidated heuristic swing verdicts as hard as a real
+# physiological measurement. It gets its own, lower weight instead.
+WEIGHT_BIO_IMAGE_AGENT = float(os.getenv("WEIGHT_BIO_IMAGE_AGENT", "0.5"))
+logger.info(f"Agent weights: {AGENT_WEIGHTS}, bio(image_plausibility)={WEIGHT_BIO_IMAGE_AGENT}")
 
 
 class NeuroSymbolicDebater:
@@ -162,7 +169,8 @@ class NeuroSymbolicDebater:
             neural_verdicts[agent] = {
                 "verdict": normalized_verdict,
                 "confidence": confidence,
-                "fake_probability": float(result.get("fake_probability", 0.0))
+                "fake_probability": float(result.get("fake_probability", 0.0)),
+                "analysis_type": result.get("analysis_type")
             }
 
             logger.info(
@@ -224,20 +232,27 @@ class NeuroSymbolicDebater:
         # =============================================================
         # 4. Biological Impossibility Override (Symbolic Rule)
         # =============================================================
-        vision_res = agent_results.get("vision", {})
         bio_res = agent_results.get("bio", {})
 
-        if isinstance(bio_res, dict) and isinstance(vision_res, dict):
+        if isinstance(bio_res, dict):
             bio_status = bio_res.get("status", "OK")
-            vision_verdict = str(vision_res.get("verdict", "")).upper()
-
-            is_human_face = (
-                "face" in str(vision_res.get("details", "")).lower() or
-                vision_verdict in ("REAL", "AUTHENTIC")
-            )
+            bio_analysis_type = bio_res.get("analysis_type")
             pulse_detected = bio_res.get("pulse_detected", None)
 
-            if bio_status == "OK" and is_human_face and pulse_detected is False:
+            # NOTE: this used to also require agent_results["vision"] to confirm a human
+            # face before firing. The `vision` agent only ever runs on images, never on
+            # video (see select_agents_by_filetype in celery_tasks.py) — so that condition
+            # was permanently unreachable for video, which is exactly the modality this
+            # rule matters most for. Bio only reaches status=="OK" with an explicit
+            # pulse_detected reading when it successfully located a face-like ROI to
+            # sample from (see agents/bio/api.py), so its own status is sufficient here.
+            #
+            # bio now also runs on still images (analysis_type == "image_plausibility"),
+            # where pulse detection is physically impossible (no temporal signal in a
+            # single frame) - that path always reports pulse_detected=None, never False,
+            # so it can't accidentally trigger this override. The analysis_type check
+            # below is an explicit belt-and-suspenders guard against that regressing.
+            if bio_analysis_type == "video_rppg" and bio_status == "OK" and pulse_detected is False:
                 reason = "BIOLOGICAL IMPOSSIBILITY: Human face detected but no pulse (rPPG) found."
                 symbolic_overrides.append(reason)
                 logger.warning(f"🚨 {reason}")
@@ -269,7 +284,10 @@ class NeuroSymbolicDebater:
 
             for agent, data in neural_verdicts.items():
                 conf = data["confidence"]
-                w = AGENT_WEIGHTS.get(agent, 1.0)
+                if agent == "bio" and data.get("analysis_type") == "image_plausibility":
+                    w = WEIGHT_BIO_IMAGE_AGENT
+                else:
+                    w = AGENT_WEIGHTS.get(agent, 1.0)
                 if data["verdict"] == "FAKE":
                     scores.append(-1.0 * conf * w)
                     reasons.append(f"{agent}(w={w:.1f}) → FAKE ({conf:.0%})")
@@ -323,13 +341,23 @@ class NeuroSymbolicDebater:
                 # --- SECURITY OVERRIDE ---
                 # Dacă cel puțin un agent e foarte sigur că e FAKE (>80%), respectăm asta
                 # chiar dacă media e ambiguă (protecție contra deepfake-urilor subtile)
-                if fake_agents and final_verdict != "FAKE":
+                #
+                # bio's image_plausibility signal is excluded from triggering this hard
+                # override: it's an unvalidated heuristic (skin-tone/texture/symmetry),
+                # not a physiological measurement like rPPG - it should influence the
+                # weighted score (with its own lower weight above) but not unilaterally
+                # force a FAKE verdict the way a >80%-confident specialized agent can.
+                security_override_candidates = [
+                    a for a in fake_agents
+                    if not (a == "bio" and neural_verdicts[a].get("analysis_type") == "image_plausibility")
+                ]
+                if security_override_candidates and final_verdict != "FAKE":
                     max_fake_conf = max(
                         neural_verdicts[a]["confidence"]
-                        for a in fake_agents
+                        for a in security_override_candidates
                     )
                     if max_fake_conf > 0.80:
-                        source_agent = max(fake_agents, key=lambda a: neural_verdicts[a]["confidence"])
+                        source_agent = max(security_override_candidates, key=lambda a: neural_verdicts[a]["confidence"])
                         final_verdict = "FAKE"
                         final_confidence = max_fake_conf
                         reasoning = (
